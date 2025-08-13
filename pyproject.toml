@@ -1,0 +1,22 @@
+[project]
+name = "euclid-q1"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "argparse>=1.4.0",
+    "h5py>=3.14.0",
+    "matplotlib>=3.10.5",
+    "numpy>=2.3.2",
+    "pandas>=2.3.1",
+    "pathlib>=1.0.1",
+    "pillow>=11.3.0",
+    "scikit-learn>=1.7.1",
+    "timm>=1.0.19",
+    "tomli>=2.2.1",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
+    "tqdm>=4.67.1",
+    "wandb>=0.21.1",
+]

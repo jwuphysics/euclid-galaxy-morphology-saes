@@ -83,7 +83,7 @@ def analyze_pca_components(
     image_paths_file: str,
     output_dir: str,
     root_dir: str = './',
-    n_components: int = 32,
+    n_components: int = 16,
     n_examples: int = 30,
     components_to_plot: list = None
 ):
@@ -155,15 +155,15 @@ if __name__ == '__main__':
                       default='./results/euclid_q1_image_paths.npy',
                       help='Path to numpy file containing image paths')
     parser.add_argument('--output_dir', type=str, 
-                      default='./results/pca_analysis',
+                      default='./results/pca',
                       help='Directory to save analysis results')
     parser.add_argument('--root_dir', type=str, default='./',
                       help='Root directory for image paths')
-    parser.add_argument('--n_components', type=int, default=32,
+    parser.add_argument('--n_components', type=int, default=16,
                       help='Number of PCA components to compute')
     parser.add_argument('--n_examples', type=int, default=30,
                       help='Number of example images to show per component')
-    parser.add_argument('--max_components_to_plot', type=int, default=16,
+    parser.add_argument('--max_components_to_plot', type=int, default=32,
                       help='Maximum number of components to plot')
     
     args = parser.parse_args()

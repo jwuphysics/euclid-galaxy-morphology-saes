@@ -31,7 +31,7 @@ Next, we can train the SAE to consolidate features and examine them. For the sta
 python src/train_sae.py
 
 # and then examine top features
-python src/analyze_features.py
+python src/analyze_sae_features.py
 ```
 
 If you want to train a Matryoshka SAE (which performs worse, unfortunately), then you can run
@@ -53,3 +53,7 @@ For comparison with the SAE features, we can also run a principal components ana
 ```bash
 python src/analyze_pca.py
 ```
+
+## Results
+
+Check out the results in `results/sae`, `results/pca`, and `results/matryoshka_sae`.

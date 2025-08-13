@@ -1,0 +1,58 @@
+# Matryoshka SAE Configuration for Euclid Q1 Dataset
+# This file contains all configuration parameters for training and evaluating
+# the Matryoshka Sparse Autoencoder on Euclid galaxy embeddings.
+
+[model]
+# Input dimension (matches ZooBot encoder output)
+input_dim = 640
+
+# Matryoshka group sizes - defines the hierarchical structure  
+# Cumulative sizes will be: 64, 128, 256, 512, 1024
+group_sizes = [64, 64, 128, 256, 512]
+
+# Number of top features to keep active per example
+top_k = 16
+
+# L1 regularization coefficient for sparsity
+l1_coeff = 0.001
+
+# Auxiliary loss penalty for dead feature revival
+aux_penalty = 0.03
+
+# Number of batches before considering a feature "dead"
+n_batches_to_dead = 256
+
+# Multiplier for auxiliary reconstruction (dead feature revival)
+aux_k_multiplier = 16
+
+[training]
+# Training parameters
+epochs = 200
+learning_rate = 0.0001
+batch_size = 256
+
+# Device selection (auto-detected if not specified)
+device = "auto"  # "cuda", "cpu", or "auto"
+
+[data]
+# Paths to data files (relative to project root)
+embedding_path = "./results/euclid_q1_embeddings.npy"
+image_paths_file = "./results/euclid_q1_image_paths.npy"
+root_dir = "./"
+
+# Train/validation split ratio
+validation_split = 0.2
+random_seed = 42
+
+[output]
+# Output directories (relative to project root)
+results_dir = "./results/matryoshka_sae"
+model_filename = "matryoshka_sae_final.pth"
+
+# Weights & Biases logging
+wandb_project = "euclid-q1-matryoshka-sae"
+
+[visualization]
+# Feature visualization parameters
+max_features_to_visualize = 16
+top_images_per_feature = 30

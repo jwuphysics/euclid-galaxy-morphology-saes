@@ -73,7 +73,7 @@ class KSparseAutoencoder(nn.Module):
 
 class EmbeddingDataset(Dataset):
     def __init__(self, npy_path: str, normalize: bool = True):
-        self.embeddings = torch.from_numpy(np.load(npy_path))
+        self.embeddings = torch.from_numpy(np.load(npy_path).astype(np.float32))
             
         if normalize:
             mean = self.embeddings.mean(0, keepdim=True)
@@ -164,14 +164,14 @@ def train_epoch(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--embedding_path', type=str, 
-                      default='./results/euclid_q1_embeddings.npy',
-                      help='Path to numpy file containing embeddings')
+                      default='./results/euclid_train_embeddings.npy',
+                      help='Path to numpy file containing train embeddings')
     parser.add_argument('--output_dir', type=str, 
                       default='./results/sae',
                       help='Directory to save checkpoints and results')
     parser.add_argument('--n_dirs', type=int, default=5120, # = 8 * 640
                       help='Number of learned dictionary elements')
-    parser.add_argument('--k', type=int, default=8,
+    parser.add_argument('--k', type=int, default=64,
                       help='How many features to use per reconstruction')
     parser.add_argument('--batch_size', type=int, default=1024)
     parser.add_argument('--num_epochs', type=int, default=200)
@@ -253,17 +253,7 @@ def main():
                 'loss': train_loss,
             }
             torch.save(checkpoint, output_dir / 'best_model.pt')
-            
-        if (epoch + 1) % 10 == 0:
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'loss': train_loss,
-            }
-            torch.save(checkpoint, output_dir / f'checkpoint_epoch_{epoch+1}.pt')
-            
+
         print(f"Epoch {epoch+1}/{args.num_epochs} - Loss: {train_loss:.4f}")
 
 if __name__ == '__main__':

@@ -1,10 +1,12 @@
 """
 This script trains and evaluates a Matryoshka Sparse Autoencoder (SAE)
-on pre-computed Euclid Q1 embeddings. It also includes functionality
-to visualize the galaxy images that most strongly activate learned SAE features.
+on MAE embeddings from Hugging Face datasets. It uses Galaxy Zoo (GZ) labels 
+from mwalmsley/euclid_q1 and MAE embeddings from mwalmsley/euclid_q1_embeddings
+for self-supervised learning (SSL). The datasets are crossmatched on id_str.
 """
 
 import argparse
+import io
 import logging
 import sys
 from datetime import datetime
@@ -13,6 +15,7 @@ from typing import Any, Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,6 +26,7 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import tomli
 import wandb
+from datasets import load_dataset
 
 
 class MatryoshkaSAE(nn.Module):
@@ -172,23 +176,47 @@ class MatryoshkaSAE(nn.Module):
         self.W_dec.data = W_dec_normed
 
 
-class EmbeddingDataset(Dataset):
-    def __init__(self, npy_path: str, normalize: bool = True):
-        self.embeddings = torch.from_numpy(np.load(npy_path).astype(np.float32))
-            
+class MAEEmbeddingDataset(Dataset):
+    """Dataset for MAE embeddings from Hugging Face with GZ labels."""
+    
+    def __init__(self, gz_dataset, mae_dataset, embedding_block: str = 'pooled_features_block_11', normalize: bool = True):
+        # Create crossmatch based on id_str
+        gz_df = gz_dataset.to_pandas()
+        mae_df = mae_dataset.to_pandas()
+        
+        # Inner join on id_str to get matched data
+        merged_df = pd.merge(gz_df, mae_df, on='id_str', how='inner')
+        
+        logging.info(f"Original GZ dataset size: {len(gz_df)}")
+        logging.info(f"Original MAE dataset size: {len(mae_df)}")
+        logging.info(f"Crossmatched dataset size: {len(merged_df)}")
+        
+        # Extract embeddings
+        embeddings_list = merged_df[embedding_block].tolist()
+        self.embeddings = torch.tensor(embeddings_list, dtype=torch.float32)
+        
+        # Store other data for potential use
+        self.id_strs = merged_df['id_str'].tolist()
+        self.gz_data = merged_df
+        
         if normalize:
             mean = self.embeddings.mean(0, keepdim=True)
             std = self.embeddings.std(0, keepdim=True)
             self.embeddings = (self.embeddings - mean) / (std + 1e-5)
+            
+        logging.info(f"Embedding shape: {self.embeddings.shape}")
             
     def __len__(self):
         return len(self.embeddings)
         
     def __getitem__(self, idx):
         return self.embeddings[idx]
+    
+    def get_id_str(self, idx):
+        return self.id_strs[idx]
 
 
-def load_config(config_path: str = "matryoshka_sae_config.toml", train: bool = False) -> Dict[str, Any]:
+def load_config(config_path: str = "mae_matryoshka_sae_config.toml", train: bool = False) -> Dict[str, Any]:
     with open(config_path, "rb") as f:
         toml_config = tomli.load(f)
     
@@ -203,11 +231,10 @@ def load_config(config_path: str = "matryoshka_sae_config.toml", train: bool = F
         "EPOCHS": toml_config["training"]["epochs"] if train else 0,
         "LEARNING_RATE": toml_config["training"]["learning_rate"],
         "SAE_BATCH_SIZE": toml_config["training"]["batch_size"],
-        "DATASET_NAME": toml_config["data"]["dataset_name"],
-        "TRAIN_EMBEDDING_PATH": toml_config["data"]["train_embedding_path"],
-        "TRAIN_IDS_PATH": toml_config["data"]["train_ids_path"],
-        "TEST_EMBEDDING_PATH": toml_config["data"]["test_embedding_path"],
-        "TEST_IDS_PATH": toml_config["data"]["test_ids_path"],
+        "GZ_DATASET_NAME": toml_config["data"]["gz_dataset_name"],
+        "GZ_CONFIG_NAME": toml_config["data"]["gz_config_name"],
+        "MAE_DATASET_NAME": toml_config["data"]["mae_dataset_name"],
+        "EMBEDDING_BLOCK": toml_config["data"]["embedding_block"],
         "RANDOM_SEED": toml_config["data"]["random_seed"],
         "BASE_RESULTS_DIR": Path(toml_config["output"]["results_dir"]),
         "MODEL_FILENAME": toml_config["output"]["model_filename"],
@@ -249,12 +276,23 @@ def setup_logging(log_file: Path):
     )
 
 
-def get_dataloaders(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
-    logging.info("Loading Euclid HF dataset embeddings...")
+def get_dataloaders(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader, MAEEmbeddingDataset, MAEEmbeddingDataset]:
+    logging.info("Loading GZ and MAE datasets from Hugging Face...")
     
-    # Load train and test datasets separately
-    train_dataset = EmbeddingDataset(config["TRAIN_EMBEDDING_PATH"], normalize=True)
-    test_dataset = EmbeddingDataset(config["TEST_EMBEDDING_PATH"], normalize=True)
+    # Load GZ dataset with labels
+    logging.info(f"Loading GZ dataset: {config['GZ_DATASET_NAME']} with config {config['GZ_CONFIG_NAME']}")
+    gz_train = load_dataset(config["GZ_DATASET_NAME"], config["GZ_CONFIG_NAME"], split="train")
+    gz_test = load_dataset(config["GZ_DATASET_NAME"], config["GZ_CONFIG_NAME"], split="test")
+    
+    # Load MAE embeddings dataset
+    logging.info(f"Loading MAE embeddings dataset: {config['MAE_DATASET_NAME']}")
+    mae_train = load_dataset(config["MAE_DATASET_NAME"], split="train")
+    mae_test = load_dataset(config["MAE_DATASET_NAME"], split="test")
+    
+    # Create crossmatched datasets
+    logging.info(f"Using embedding block: {config['EMBEDDING_BLOCK']}")
+    train_dataset = MAEEmbeddingDataset(gz_train, mae_train, config["EMBEDDING_BLOCK"], normalize=True)
+    test_dataset = MAEEmbeddingDataset(gz_test, mae_test, config["EMBEDDING_BLOCK"], normalize=True)
 
     train_loader = DataLoader(
         train_dataset, 
@@ -274,7 +312,7 @@ def get_dataloaders(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader]:
     logging.info(f"Train dataset size: {len(train_dataset)}")
     logging.info(f"Test dataset size: {len(test_dataset)}")
     logging.info("Dataloaders created.")
-    return train_loader, test_loader
+    return train_loader, test_loader, train_dataset, test_dataset
 
 
 def train_sae(
@@ -452,16 +490,15 @@ def compute_matryoshka_activations(
 def plot_matryoshka_feature_examples(
     feature_idx: int, 
     activations: torch.Tensor,
-    hf_dataset,
-    test_ids: List[str],
+    test_dataset: MAEEmbeddingDataset,
     n_examples: int = 30, 
     save_path: Path = None
 ):
     feature_acts = activations[:, feature_idx]
     top_acts, top_indices = torch.topk(feature_acts, k=min(n_examples, len(feature_acts)))
     
-    # Create id_str to index mapping for quick lookup
-    id_to_idx = {item['id_str']: idx for idx, item in enumerate(hf_dataset)}
+    # Get corresponding GZ data for images
+    gz_data = test_dataset.gz_data
     
     n_cols = min(5, n_examples)
     n_rows = (n_examples + n_cols - 1) // n_cols  # Ceiling division
@@ -473,31 +510,38 @@ def plot_matryoshka_feature_examples(
         
         act_val = top_acts[i].item()
         test_idx = top_indices[i].item()
-        id_str = test_ids[test_idx]
         
         try:
-            # Find the corresponding image in HF dataset
-            if id_str in id_to_idx:
-                dataset_idx = id_to_idx[id_str]
-                img = hf_dataset[dataset_idx]['image']
+            # Get the corresponding image from GZ data
+            row = gz_data.iloc[test_idx]
+            id_str = row['id_str']
+            
+            # Extract image from HF dataset format
+            if 'image' in row and row['image'] is not None:
+                img_data = row['image']
+                if hasattr(img_data, 'get'):
+                    img = img_data  # Already a PIL image
+                else:
+                    # Handle bytes data if needed
+                    img = Image.open(io.BytesIO(img_data['bytes']))
                 
                 # Ensure image is RGB
-                if img.mode != 'RGB':
+                if hasattr(img, 'mode') and img.mode != 'RGB':
                     img = img.convert('RGB')
                     
                 # Resize and display
                 img = img.resize((224, 224), Image.Resampling.LANCZOS)
                 ax.imshow(img)
                 ax.axis('off')
-                ax.set_title(f'val: {act_val:.2f}')
+                ax.set_title(f'val: {act_val:.2f}\nID: {id_str[:20]}')
             else:
-                ax.text(0.5, 0.5, f"ID not found:\n{id_str}", 
+                ax.text(0.5, 0.5, f"No image:\n{id_str[:20]}", 
                        ha='center', va='center')
                 ax.axis('off')
                 
         except Exception as e:
-            print(f"Error loading image {id_str}: {e}")
-            ax.text(0.5, 0.5, f"Error loading\n{id_str}", 
+            print(f"Error loading image for index {test_idx}: {e}")
+            ax.text(0.5, 0.5, f"Error loading\nindex {test_idx}", 
                    ha='center', va='center')
             ax.axis('off')
     
@@ -510,6 +554,7 @@ def plot_matryoshka_feature_examples(
 def visualize_top_activating_images(
     model: MatryoshkaSAE,
     test_loader: DataLoader,
+    test_dataset: MAEEmbeddingDataset,
     config: Dict[str, Any],
     figures_dir: Path,
     feature_indices_to_inspect: List[int],
@@ -519,19 +564,13 @@ def visualize_top_activating_images(
     
     all_activations = compute_matryoshka_activations(model, test_loader, config)
     
-    # Load test IDs and HF dataset
-    test_ids = np.load(config["TEST_IDS_PATH"], allow_pickle=True)
-    from datasets import load_dataset
-    hf_dataset = load_dataset(config["DATASET_NAME"], split="test")
-    
     logging.info("Generating feature plots...")
     for feature_idx in tqdm(feature_indices_to_inspect, desc="Plotting features"):
         plot_path = figures_dir / f"feature_{feature_idx}.png"
         plot_matryoshka_feature_examples(
             feature_idx=feature_idx,
             activations=all_activations,
-            hf_dataset=hf_dataset,
-            test_ids=test_ids,
+            test_dataset=test_dataset,
             n_examples=num_top_images,
             save_path=plot_path
         )
@@ -540,11 +579,11 @@ def visualize_top_activating_images(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train or evaluate Matryoshka SAE on Euclid Q1 data")
+    parser = argparse.ArgumentParser(description="Train or evaluate Matryoshka SAE on Euclid Q1 MAE embeddings")
     parser.add_argument("--train", action="store_true", 
                        help="Run training mode (default: evaluation mode)")
-    parser.add_argument("--config", type=str, default="matryoshka_sae_config.toml",
-                       help="Path to configuration file (default: matryoshka_sae_config.toml)")
+    parser.add_argument("--config", type=str, default="mae_matryoshka_sae_config.toml",
+                       help="Path to configuration file (default: mae_matryoshka_sae_config.toml)")
     args = parser.parse_args()
     
     config = load_config(config_path=args.config, train=args.train) 
@@ -556,7 +595,7 @@ def main():
     logging.info(f"Using device: {config['DEVICE']}")
     logging.info(f"Run directory created at: {paths['run']}")
 
-    train_loader, test_loader = get_dataloaders(config)
+    train_loader, test_loader, train_dataset, test_dataset = get_dataloaders(config)
 
     if args.train:
         wandb.init(
@@ -603,6 +642,7 @@ def main():
     visualize_top_activating_images(
         model=model,
         test_loader=test_loader,
+        test_dataset=test_dataset,
         config=config,
         figures_dir=paths["figures"],
         feature_indices_to_inspect=features_to_look_at,

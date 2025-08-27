@@ -1,14 +1,12 @@
-import os
-import pandas as pd
 import torch
 import timm
-import glob
 from torchvision import transforms
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
-from typing import List, Dict, Optional, Tuple, Union
+from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
+from datasets import load_dataset
 
 class ImageActivationExtractor:
     def __init__(
@@ -69,50 +67,50 @@ class ImageActivationExtractor:
         for handle in self.hook_handles:
             handle.remove()
     
-    def extract_from_dataframe(
+    def extract_from_hf_dataset(
         self, 
-        df: pd.DataFrame, 
-        image_path_column: str,
-        id_column: Optional[str] = None
-    ) -> Tuple[np.ndarray, List]:
+        dataset_name: str = "mwalmsley/gz_euclid",
+        split: str = "train"
+    ) -> Tuple[np.ndarray, List[str]]:
         """
-        Extract activations for images in a DataFrame.
+        Extract activations for images in a Huggingface dataset.
         
         Args:
-            df: DataFrame containing image paths
-            image_path_column: Name of column containing image paths
-            id_column: Optional column to use as identifiers for the images
+            dataset_name: Name of the Huggingface dataset
+            split: Dataset split to use ("train" or "test")
             
         Returns:
             Tuple of (activations array, list of image IDs)
         """
-        class ImageDataset(Dataset):
-            def __init__(self, df, image_path_column, id_column, transform):
-                self.df = df
-                self.image_paths = df[image_path_column].tolist()
-                self.ids = df[id_column].tolist() if id_column else list(range(len(df)))
+        print(f"Loading Huggingface dataset: {dataset_name}, split: {split}")
+        dataset = load_dataset(dataset_name, split=split)
+        
+        class HFImageDataset(Dataset):
+            def __init__(self, hf_dataset, transform):
+                self.hf_dataset = hf_dataset
                 self.transform = transform
                 
             def __len__(self):
-                return len(self.df)
-
+                return len(self.hf_dataset)
 
             def __getitem__(self, idx):
-                img_path = self.image_paths[idx]
-                img_id = self.ids[idx]
+                item = self.hf_dataset[idx]
+                img = item['image']
+                img_id = item['id_str']
                 
                 try:
-                    with Image.open(img_path) as img:
+                    # Convert PIL image to RGB if needed
+                    if img.mode != 'RGB':
                         img = img.convert('RGB')
-                        img_tensor = self.transform(img)
+                    img_tensor = self.transform(img)
                     return img_tensor, img_id
                 except Exception as e:
-                    print(f"Error loading image {img_path}: {e}")
-                    # Return a zero tensor with the correct shape if image loading fails
+                    print(f"Error processing image {img_id}: {e}")
+                    # Return a zero tensor with the correct shape if image processing fails
                     return torch.zeros(3, 224, 224), img_id
             
-        dataset = ImageDataset(df, image_path_column, id_column, self.transform)
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, num_workers=4)
+        dataset_wrapper = HFImageDataset(dataset, self.transform)
+        dataloader = DataLoader(dataset_wrapper, batch_size=self.batch_size, num_workers=4)
         
         all_activations = []
         all_ids = []
@@ -129,37 +127,6 @@ class ImageActivationExtractor:
                 all_ids.extend(batch_ids)
                 
         return np.vstack(all_activations), all_ids
-        
-    def extract_from_directory(
-        self, 
-        root_dir: str, 
-        pattern: str = "*.jpg"
-    ) -> Tuple[np.ndarray, List[str]]:
-        """
-        Recursively extract activations from all images in a directory.
-        
-        Args:
-            root_dir: Root directory to scan for images
-            pattern: File pattern to match (default: "*.jpg")
-            
-        Returns:
-            Tuple of (activations array, list of image paths)
-        """
-        import glob
-        
-        # Find all image files recursively
-        image_paths = []
-        for dirpath, _, _ in os.walk(root_dir):
-            paths = glob.glob(os.path.join(dirpath, pattern))
-            image_paths.extend(paths)
-            
-        print(f"Found {len(image_paths)} images matching pattern {pattern}")
-        
-        # Create a DataFrame
-        df = pd.DataFrame({"image_path": image_paths})
-        
-        # Extract features
-        return self.extract_from_dataframe(df, "image_path")
 
 if __name__ == "__main__":
     torch.multiprocessing.set_sharing_strategy('file_system')
@@ -171,20 +138,27 @@ if __name__ == "__main__":
         image_size=224
     )
 
-
-    image_paths = []
-    for dirpath, _, _ in os.walk("./data/q1/cutouts_jpg/"):
-        paths = glob.glob(os.path.join(dirpath, "*.jpg"))
-        image_paths.extend(paths)
-    np.save("./results/euclid_q1_image_paths.npy", image_paths)
-    
-    activations, _ = extractor.extract_from_directory(
-        root_dir="./data/q1/cutouts_jpg/",  
-        pattern="*.jpg"       
+    # Extract embeddings from train split
+    print("Extracting embeddings from train split...")
+    train_activations, train_ids = extractor.extract_from_hf_dataset(
+        dataset_name="mwalmsley/gz_euclid",
+        split="train"
     )
-
     
-    # Save the activations to a file
-    np.save("./results/euclid_q1_embeddings.npy", activations)
+    # Extract embeddings from test split  
+    print("Extracting embeddings from test split...")
+    test_activations, test_ids = extractor.extract_from_hf_dataset(
+        dataset_name="mwalmsley/gz_euclid", 
+        split="test"
+    )
     
-    print(f"Extracted activations with shape: {activations.shape}") # (380111, 640)
+    # Save the embeddings and IDs
+    np.save("./results/euclid_train_embeddings.npy", train_activations)
+    np.save("./results/euclid_train_ids.npy", train_ids)
+    np.save("./results/euclid_test_embeddings.npy", test_activations)
+    np.save("./results/euclid_test_ids.npy", test_ids)
+    
+    print(f"Train embeddings shape: {train_activations.shape}")
+    print(f"Test embeddings shape: {test_activations.shape}")
+    print(f"Train IDs: {len(train_ids)} samples")
+    print(f"Test IDs: {len(test_ids)} samples")

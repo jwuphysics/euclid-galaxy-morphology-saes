@@ -7,11 +7,10 @@
 input_dim = 640
 
 # Matryoshka group sizes - defines the hierarchical structure  
-# Cumulative sizes will be: 64, 128, 256, 512, 1024
-group_sizes = [64, 64, 128, 256, 512]
+group_sizes = [64, 64, 128, 256, 512, 1024]
 
 # Number of top features to keep active per example
-top_k = 16
+top_k = 64
 
 # L1 regularization coefficient for sparsity
 l1_coeff = 0.001
@@ -35,13 +34,14 @@ batch_size = 256
 device = "auto"  # "cuda", "cpu", or "auto"
 
 [data]
-# Paths to data files (relative to project root)
-embedding_path = "./results/euclid_q1_embeddings.npy"
-image_paths_file = "./results/euclid_q1_image_paths.npy"
-root_dir = "./"
+# Huggingface dataset configuration
+dataset_name = "mwalmsley/gz_euclid"
+train_embedding_path = "./results/euclid_train_embeddings.npy"
+train_ids_path = "./results/euclid_train_ids.npy"
+test_embedding_path = "./results/euclid_test_embeddings.npy"
+test_ids_path = "./results/euclid_test_ids.npy"
 
-# Train/validation split ratio
-validation_split = 0.2
+# Random seed for reproducibility
 random_seed = 42
 
 [output]
@@ -54,5 +54,5 @@ wandb_project = "euclid-q1-matryoshka-sae"
 
 [visualization]
 # Feature visualization parameters
-max_features_to_visualize = 16
+max_features_to_visualize = 64
 top_images_per_feature = 30

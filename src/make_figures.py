@@ -1,16 +1,5 @@
 """
-Figure generation for euclid-q1 analysis.
-
-This module consolidates figure generation from the notebook analysis,
-focusing on the correlation and novelty comparison plots for both
-supervised and self-supervised (SSL) SAE vs PCA features.
-
-Key figures generated:
-- *_feature_comparison_corr.pdf
-- *_feature_comparison_corr_all.pdf  
-- *_feature_comparison_novelty_all.pdf
-
-Where * is either "supervised" or "ssl".
+Generating figures for the Euclid Q1 SAE interpretability analysis.
 """
 
 import pickle
@@ -750,6 +739,132 @@ def make_ssl_novelty_all_figure():
     plt.tight_layout()
     output_path = REPO_BASE / 'results/figures/ssl_feature_comparison_novelty_all.pdf'
     plt.savefig(output_path, bbox_inches='tight', dpi=300)
+    plt.close()
+
+
+def make_feature_gallery(feature_type, mode, feature_id, reverse=False, prefix=None):
+    """
+    Create a single-row gallery of 10 galaxy images for a specific feature.
+    
+    Args:
+        feature_type: 'sae' or 'pca'
+        mode: 'supervised' or 'ssl'  
+        feature_id: The specific feature number/ID
+        reverse: If True, show images with lowest activations (for PCA negative direction)
+        prefix: Optional string prefix for the output filename (e.g., "00", "01")
+    
+    Saves to: results/figures/gallery/{prefix}-{mode}-{feature_type}-{feature_id}.pdf
+    """
+    
+    if mode == 'supervised':
+        # Load supervised data
+        test_embeddings, test_ids, sae_model, pca_transformed, gz_dataset = load_supervised_data()
+        
+        # Create ID mapping for images
+        id_to_idx = {item['id_str']: idx for idx, item in enumerate(gz_dataset)}
+        
+        if feature_type == 'sae':
+            # Compute SAE activations
+            sae_activations = compute_sae_activations(sae_model, test_embeddings)
+            feature_activations = sae_activations[:, feature_id].numpy()
+        elif feature_type == 'pca':
+            feature_activations = pca_transformed[:, feature_id]
+        else:
+            raise ValueError("feature_type must be 'sae' or 'pca'")
+            
+    elif mode == 'ssl':
+        # Load SSL data
+        test_embeddings, test_ids, sae_model, pca_transformed, morphology_df, gz_dataset = load_ssl_data()
+        
+        # Create ID mapping for images
+        gz_id_to_idx = {item['id_str']: idx for idx, item in enumerate(gz_dataset)}
+        
+        if feature_type == 'sae':
+            # Compute SAE activations
+            sae_activations = compute_sae_activations(sae_model, test_embeddings)
+            feature_activations = sae_activations[:, feature_id].numpy()
+        elif feature_type == 'pca':
+            feature_activations = pca_transformed[:, feature_id]
+        else:
+            raise ValueError("feature_type must be 'sae' or 'pca'")
+            
+    else:
+        raise ValueError("mode must be 'supervised' or 'ssl'")
+    
+    # Get activations for this feature
+    if reverse:
+        # Show most negative activations (lowest values) - first 10 from sorted array
+        top_indices = np.argsort(feature_activations)[:10]
+    else:
+        # Show most positive activations (highest values) - last 10 from sorted array, reversed
+        top_indices = np.argsort(feature_activations)[-10:][::-1]
+    
+    # Create figure with single row of images
+    fig, axes = plt.subplots(1, 10, figsize=(20, 2), dpi=300)
+    
+    for i, ax in enumerate(axes):
+        if i < len(top_indices):
+            sample_idx = top_indices[i]
+            id_str = test_ids[sample_idx]
+            
+            try:
+                # Get image based on mode
+                if mode == 'supervised':
+                    if id_str in id_to_idx:
+                        dataset_idx = id_to_idx[id_str]
+                        img = gz_dataset[dataset_idx]['image']
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        img = img.resize((224, 224), Image.Resampling.LANCZOS)
+                        ax.imshow(img)
+                    else:
+                        # Show blank if image not found
+                        ax.set_facecolor('lightgray')
+                else:  # SSL mode
+                    if id_str in gz_id_to_idx:
+                        dataset_idx = gz_id_to_idx[id_str]
+                        img = gz_dataset[dataset_idx]['image']
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        img = img.resize((224, 224), Image.Resampling.LANCZOS)
+                        ax.imshow(img)
+                    else:
+                        # Show blank if image not found
+                        ax.set_facecolor('lightgray')
+                        
+            except Exception:
+                # Show blank on any error
+                ax.set_facecolor('lightgray')
+        else:
+            # Show blank for missing images
+            ax.set_facecolor('lightgray')
+            
+        # Remove all axes, ticks, and labels
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(False)
+        ax.spines['left'].set_visible(False)
+    
+    # Set minimal spacing between images
+    plt.subplots_adjust(wspace=0.02, hspace=0, left=0, right=1, top=1, bottom=0)
+    
+    # Create output directory and save
+    output_dir = REPO_BASE / 'results/figures/gallery'
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Add suffix for reverse galleries
+    suffix = "-rev" if reverse else ""
+    
+    # Add prefix to filename if provided
+    if prefix:
+        filename = f"{prefix}-{mode}-{feature_type}-{feature_id}{suffix}.pdf"
+    else:
+        filename = f"{mode}-{feature_type}-{feature_id}{suffix}.pdf"
+    
+    output_path = output_dir / filename
+    plt.savefig(output_path, bbox_inches='tight', pad_inches=0, dpi=300)
     plt.close()
 
 

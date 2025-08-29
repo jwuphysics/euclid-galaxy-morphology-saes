@@ -8,6 +8,9 @@ from typing import List, Dict, Optional, Tuple
 from tqdm import tqdm
 from datasets import load_dataset
 
+# Import shared utilities
+from .utils import set_seed, configure_torch_reproducibility
+
 class ImageActivationExtractor:
     def __init__(
         self, 
@@ -129,6 +132,10 @@ class ImageActivationExtractor:
         return np.vstack(all_activations), all_ids
 
 if __name__ == "__main__":
+    # Initialize reproducible random state
+    set_seed(42)
+    configure_torch_reproducibility()
+    
     torch.multiprocessing.set_sharing_strategy('file_system')
     
     extractor = ImageActivationExtractor(

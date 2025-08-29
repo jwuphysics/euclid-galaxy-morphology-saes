@@ -1,0 +1,59 @@
+# MAE Matryoshka SAE Configuration for Euclid Q1 SSL Dataset
+# This file contains all configuration parameters for training and evaluating
+# the Matryoshka Sparse Autoencoder on MAE embeddings with Galaxy Zoo labels.
+
+[model]
+# Input dimension (matches MAE embedding output)
+input_dim = 384
+
+# Matryoshka group sizes - defines the hierarchical structure  
+group_sizes = [32, 64, 64, 128, 256]
+
+# Number of top features to keep active per example
+top_k = 32
+
+# L1 regularization coefficient for sparsity
+l1_coeff = 0.001
+
+# Auxiliary loss penalty for dead feature revival
+aux_penalty = 0.03
+
+# Number of batches before considering a feature "dead"
+n_batches_to_dead = 256
+
+# Multiplier for auxiliary reconstruction (dead feature revival)
+aux_k_multiplier = 16
+
+[training]
+# Training parameters
+epochs = 200
+learning_rate = 0.0001
+batch_size = 256
+
+# Device selection (auto-detected if not specified)
+device = "auto"  # "cuda", "cpu", or "auto"
+
+[data]
+# Huggingface dataset configuration
+gz_dataset_name = "mwalmsley/euclid_q1"
+gz_config_name = "v1-gz_arcsinh_vis_y"
+mae_dataset_name = "mwalmsley/euclid_q1_embeddings"
+
+# Which MAE embedding block to use
+embedding_block = "pooled_features_block_11"
+
+# Random seed for reproducibility
+random_seed = 42
+
+[output]
+# Output directories (relative to project root)
+results_dir = "./results/mae_matryoshka_sae"
+model_filename = "mae_matryoshka_sae_final.pth"
+
+# Weights & Biases logging
+wandb_project = "euclid-q1-mae-matryoshka-sae"
+
+[visualization]
+# Feature visualization parameters
+max_features_to_visualize = 32
+top_images_per_feature = 30

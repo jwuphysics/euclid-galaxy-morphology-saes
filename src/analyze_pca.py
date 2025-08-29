@@ -14,6 +14,9 @@ from sklearn.preprocessing import StandardScaler
 import argparse
 from datasets import load_dataset
 
+# Import shared utilities
+from .utils import set_seed, configure_torch_reproducibility
+
 
 def compute_pca_components(embedding_path: str, n_components: int = 32, standardize: bool = True):
     print("Loading embeddings...")
@@ -207,6 +210,10 @@ if __name__ == '__main__':
                       help='Maximum number of components to plot')
     
     args = parser.parse_args()
+    
+    # Initialize reproducible random state
+    set_seed(42)
+    configure_torch_reproducibility()
     
     components_to_plot = list(range(min(args.max_components_to_plot, args.n_components)))
     

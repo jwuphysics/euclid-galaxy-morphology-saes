@@ -6,6 +6,9 @@ from tqdm import tqdm
 from PIL import Image
 from datasets import load_dataset
 
+# Import shared utilities
+from .utils import set_seed, configure_torch_reproducibility
+
 class KSparseAutoencoder(torch.nn.Module):
     def __init__(self, n_dirs: int, d_model: int, k: int):
         super().__init__()
@@ -195,6 +198,10 @@ def analyze_activations(model_path, embedding_path, embedding_ids_path, output_d
     return frequencies, mean_magnitudes, indices, values
 
 if __name__ == '__main__':
+    # Initialize reproducible random state
+    set_seed(42)
+    configure_torch_reproducibility()
+    
     MODEL_PATH = './results/sae/best_model.pt'
     EMBEDDING_PATH = './results/euclid_test_embeddings.npy'
     EMBEDDING_IDS_PATH = './results/euclid_test_ids.npy'

@@ -27,6 +27,9 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+# Import shared utilities
+from .utils import set_seed, configure_torch_reproducibility
+
 # Repository base path (parent of src/)
 REPO_BASE = Path(__file__).parent.parent
 
@@ -870,6 +873,10 @@ def make_feature_gallery(feature_type, mode, feature_id, reverse=False, prefix=N
 
 if __name__ == "__main__":
     """Generate all figures"""
+    
+    # Initialize reproducible random state
+    set_seed(42)
+    configure_torch_reproducibility()
     
     print("Generating supervised figures...")
     make_supervised_correlation_figure()

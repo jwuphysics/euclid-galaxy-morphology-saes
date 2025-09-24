@@ -46,7 +46,7 @@ random_seed = 42
 
 [output]
 # Output directories (relative to project root)
-results_dir = "./results/matryoshka_sae"
+results_dir = "./results/sae"
 model_filename = "matryoshka_sae_final.pth"
 
 # Weights & Biases logging

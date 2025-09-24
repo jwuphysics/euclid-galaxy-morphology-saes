@@ -25,11 +25,22 @@ import tomli
 import wandb
 
 # Import shared utilities
-from .models import MatryoshkaSAE
-from .utils import (
-    set_seed, configure_torch_reproducibility, 
-    load_config, get_supervised_dataloaders
-)
+try:
+    from .models import MatryoshkaSAE
+    from .utils import (
+        set_seed, configure_torch_reproducibility, 
+        load_config, get_supervised_dataloaders
+    )
+except ImportError:
+    # When running as script directly
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent))
+    from models import MatryoshkaSAE
+    from utils import (
+        set_seed, configure_torch_reproducibility, 
+        load_config, get_supervised_dataloaders
+    )
 
 
 

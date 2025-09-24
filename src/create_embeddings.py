@@ -9,7 +9,14 @@ from tqdm import tqdm
 from datasets import load_dataset
 
 # Import shared utilities
-from .utils import set_seed, configure_torch_reproducibility
+try:
+    from .utils import set_seed, configure_torch_reproducibility
+except ImportError:
+    # When running as script directly
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent))
+    from utils import set_seed, configure_torch_reproducibility
 
 class ImageActivationExtractor:
     def __init__(

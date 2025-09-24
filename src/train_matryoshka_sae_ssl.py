@@ -29,11 +29,22 @@ import wandb
 from datasets import load_dataset
 
 # Import shared utilities
-from .models import MatryoshkaSAE
-from .utils import (
-    set_seed, configure_torch_reproducibility,
-    load_config, get_ssl_dataloaders, MAEEmbeddingDataset
-)
+try:
+    from .models import MatryoshkaSAE
+    from .utils import (
+        set_seed, configure_torch_reproducibility,
+        load_config, get_ssl_dataloaders, MAEEmbeddingDataset
+    )
+except ImportError:
+    # When running as script directly
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent))
+    from models import MatryoshkaSAE
+    from utils import (
+        set_seed, configure_torch_reproducibility,
+        load_config, get_ssl_dataloaders, MAEEmbeddingDataset
+    )
 
 
 # MatryoshkaSAE class now imported from models module
@@ -271,11 +282,20 @@ def plot_matryoshka_feature_examples(
             # Extract image from HF dataset format
             if 'image' in row and row['image'] is not None:
                 img_data = row['image']
-                if hasattr(img_data, 'get'):
-                    img = img_data  # Already a PIL image
-                else:
-                    # Handle bytes data if needed
+                
+                # Handle different HF dataset image formats
+                if hasattr(img_data, 'resize'):
+                    # Already a PIL Image
+                    img = img_data
+                elif isinstance(img_data, dict) and 'bytes' in img_data:
+                    # Image stored as bytes in dictionary
                     img = Image.open(io.BytesIO(img_data['bytes']))
+                elif hasattr(img_data, 'convert'):
+                    # Some other PIL-like image format
+                    img = img_data
+                else:
+                    # Try to treat as PIL Image directly
+                    img = img_data
                 
                 # Ensure image is RGB
                 if hasattr(img, 'mode') and img.mode != 'RGB':

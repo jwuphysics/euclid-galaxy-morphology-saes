@@ -7,10 +7,10 @@
 input_dim = 384
 
 # Matryoshka group sizes - defines the hierarchical structure  
-group_sizes = [32, 64, 64, 128, 256]
+group_sizes = [64, 64, 128, 256, 512, 1024]
 
 # Number of top features to keep active per example
-top_k = 32
+top_k = 64
 
 # L1 regularization coefficient for sparsity
 l1_coeff = 0.001
@@ -36,11 +36,11 @@ device = "auto"  # "cuda", "cpu", or "auto"
 [data]
 # Huggingface dataset configuration
 gz_dataset_name = "mwalmsley/euclid_q1"
-gz_config_name = "v1-gz_arcsinh_vis_y"
+gz_config_name = "v1-gz_arcsinh_vis_y" # "v1-gz_arcsinh_vis_y___rr2-mae-encoder" <-- will be new name soon?
 mae_dataset_name = "mwalmsley/euclid_q1_embeddings"
 
 # Which MAE embedding block to use
-embedding_block = "pooled_features_block_11"
+embedding_block = "pooled_features_block_11" # update this if you swap out the `gz_config_name`
 
 # Random seed for reproducibility
 random_seed = 42

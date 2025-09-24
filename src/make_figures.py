@@ -720,7 +720,7 @@ def make_ssl_correlation_figure(secondary_features=False):
     
     # Compute SAE activations and get top features
     sae_activations = compute_sae_activations(sae_model, test_embeddings)
-    top_sae_features, _ = get_top_sae_features(sae_activations)
+    top_sae_features, _ = get_top_sae_features(sae_activations, n_features=sae_activations.shape[1])
     
     # Extract morphology features
     gz_features, valid_indices, gz_feature_cols = extract_ssl_gz_features(morphology_df, test_ids)
@@ -1171,7 +1171,7 @@ if __name__ == "__main__":
     # make_supervised_novelty_all_figure()
     
     # print("Generating SSL figures...")
-    # make_ssl_correlation_figure()
+    make_ssl_correlation_figure()
     # make_ssl_correlation_figure(secondary_features=True)
     make_ssl_correlation_all_figure()
     # make_ssl_correlation_all_figure(secondary_features=True)

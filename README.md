@@ -1,59 +1,116 @@
-# Euclid Q1 Galaxy Feature Atlas: Zoobot and Matryoshka SAEs
+# Re-envisioning Euclid Galaxy Morphology: Identifying and Interpreting Features with Sparse Autoencoders
 
 ## Overview
 
-This project uses sparse autoencoders (SAEs) to identify learned features in Zoobot, a neural network trained to classify galaxy morphology. 
+We use sparse autoencoders (SAEs) to identify learned features in galaxy embeddings from both supervised (Zoobot) and self-supervised (MAE) models. We compare SAE features with PCA baselines against Galaxy Zoo morphology labels in order to interpret them + examine novelty. 
 
-All data are loaded directly from the Euclid Q1 [GalaxyZoo Huggingface dataset](https://huggingface.co/datasets/mwalmsley/gz_euclid) (see the general framework [here](https://github.com/mwalmsley/galaxy-datasets)). We use the [Zoobot-Euclid encoder model](https://huggingface.co/mwalmsley/zoobot-encoder-euclid) by Mike Walmsley et al; read more about this work on [arXiv](https://arxiv.org/abs/2503.15310).
+All supervised data are loaded directly from the Euclid Q1 [GalaxyZoo Huggingface dataset](https://huggingface.co/datasets/mwalmsley/gz_euclid) (see the general framework [here](https://github.com/mwalmsley/galaxy-datasets)). We use the [Zoobot-Euclid encoder model](https://huggingface.co/mwalmsley/zoobot-encoder-euclid) by Mike Walmsley et al; read more about this work on [arXiv](https://arxiv.org/abs/2503.15310).
 
+The self-supervised model is a [ViT trained via masked autoencoder reconstruction](https://huggingface.co/mwalmsley/euclid_encoder_mae_zoobot_vit_small_patch8_224), originating from the larger Euclid [Euclid "RR2" dataset](https://huggingface.co/datasets/mwalmsley/euclid_rr2).
 
-## What's in this repository
+## Repository Structure
 
-- `src/create_embeddings.py` - Extracts feature vectors from Euclid Q1 galaxy images using Zoobot encoder model
-- `src/train_sae.py` - Trains a k-sparse autoencoder to learn interpretable features from these embeddings
-- `src/train_matryoshka_sae.py` - Trains a Matryoshka SAE that can operate at different feature budget levels
-- `src/analyze_sae_features.py` - Visualizes which galaxy images most strongly activate specific learned features
-- `src/analyze_pca.py` - PCA baseline analysis for comparison with SAE features
-
-
-## Running the code
-
-It's easiest to set up the environment with `uv sync`. You can then activate the venv and then run the commands below, or e.g. use `uv run src/create_embeddings.py`.
-
-First, extract embeddings from the Huggingface dataset (this will download `mwalmsley/gz_euclid` automatically):
-```bash
-python src/create_embeddings.py
+```
+src/
+├── models/
+│   ├── matryoshka_sae.py
+│   └── __init__.py
+├── utils/
+│   ├── reproducibility.py
+│   ├── data_loading.py
+│   ├── visualization.py
+│   └── __init__.py
+├── config/
+│   ├── matryoshka_sae_config.toml
+│   └── mae_matryoshka_sae_config.toml
+├── create_embeddings.py
+├── create_mae_embeddings.py
+├── train_matryoshka_sae.py
+├── train_matryoshka_sae_ssl.py
+├── analyze_sae_features.py
+├── analyze_pca.py
+└── make_figures.py
 ```
 
-Next, train the SAE and analyze features. For the standard k-sparse SAE:
+## Quick Start
 
+### Supervised Zoobot embeddings
+1. Extract embeddings by running `uv run src/create_embeddings.py`
+2. Train SAE via `uv run src/train_matryoshka_sae.py --train --config src/config/matryoshka_sae_config.toml`
+3. Plot features using `uv run src/analyze_sae_features.py`
+4. Compare against PCA baseline (+plotting) via `uv run src/analyze_pca.py`
+
+### Self-supervised (MAE) embeddings
+1. Train SSL SAE via `uv run src/train_matryoshka_sae_ssl.py --train --config src/config/mae_matryoshka_sae_config.toml`
+2. Extract MAE embeddings for analysis by running `uv run src/create_mae_embeddings.py`
+3. Generate PCA analysis on MAE embeddings via
+    ```
+    uv run src/analyze_pca.py \
+      --embedding_path results/mae_analysis/mae_test_embeddings.npy \
+      --embedding_ids_path results/mae_analysis/mae_test_ids.npy \
+      --output_dir results/mae_analysis/pca \
+      --n_components 64 
+   ```
+5. Generate figures with `uv run src/make_figures.py`
+
+## Slightly more detailed setup...
+
+You can load the virtual Python environment with `uv sync`.
+
+### Extracting features from supervised models
+1. Extract embeddings from Zoobot encoder:
+   ```bash
+   uv run src/create_embeddings.py
+   ```
+
+2. Train Matryoshka SAE:
+   ```bash
+   uv run src/train_matryoshka_sae.py --train
+   ```
+
+3. Analyze learned features:
+   ```bash
+   uv run src/analyze_sae_features.py
+   ```
+
+4. Run PCA baseline:
+   ```bash
+   uv run src/analyze_pca.py
+   ```
+
+### Extracting features from the self-supervised model
+1. Train on MAE embeddings with Galaxy Zoo crossmatch:
+   ```bash
+   uv run src/train_matryoshka_sae_ssl.py --train
+   ```
+
+2. Extract MAE embeddings for analysis:
+   ```bash
+   uv run src/create_mae_embeddings.py
+   ```
+
+3. Generate PCA baseline on MAE embeddings:
+   ```bash
+   uv run src/analyze_pca.py --embedding_path results/mae_analysis/mae_test_embeddings.npy --embedding_ids_path results/mae_analysis/mae_test_ids.npy --output_dir results/mae_analysis/pca --n_components 64
+   ```
+
+### Generate figures 
+Create comparison plots between supervised/SSL and SAE/PCA methods:
 ```bash
-python src/train_sae.py
-
-# then examine top features
-python src/analyze_sae_features.py
+uv run src/make_figures.py
 ```
 
-For the Matryoshka SAE:
-```bash
-python src/train_matryoshka_sae.py --train
-```
+## Configuration
 
-The Matryoshka SAE script handles feature visualization automatically. Remove `--train` to only run evaluation.
-
-Customize training with config files:
-```bash
-python src/train_matryoshka_sae.py --train --config my_config.toml
-```
-
-## Baseline Comparison
-
-For comparison with the SAE features, we can also run a principal components analysis (PCA) baseline on the same embeddings:
-
-```bash
-python src/analyze_pca.py
-```
+Training parameters can be customized in TOML config files:
+- `src/config/matryoshka_sae_config.toml` - Supervised analysis settings
+- `src/config/mae_matryoshka_sae_config.toml` - Self-supervised analysis settings
 
 ## Results
 
-Check out the results in `results/sae`, `results/pca`, and `results/matryoshka_sae`.
+Results are organized in the `results/` directory:
+- `results/sae/` - Supervised SAE results
+- `results/mae_matryoshka_sae/` - Self-supervised SAE results  
+- `results/pca/` - PCA baseline results (supervised)
+- `results/mae_analysis/` - MAE embeddings and PCA baseline results (SSL)
+- `results/figures/` - Publication-ready comparison figures

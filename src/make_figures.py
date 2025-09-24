@@ -27,6 +27,16 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
+# Import shared utilities
+try:
+    from .utils import set_seed, configure_torch_reproducibility
+except ImportError:
+    # When running as script directly
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent))
+    from utils import set_seed, configure_torch_reproducibility
+
 # Repository base path (parent of src/)
 REPO_BASE = Path(__file__).parent.parent
 
@@ -110,23 +120,82 @@ def get_top_sae_features(dense_activations, n_features=64, min_freq=0.01):
     return active_features[sorted_idxs][:n_features], frequencies
 
 
-def compute_max_correlations(features, gz_features, feature_names):
-    """Compute maximum Spearman correlation between each feature and any GZ feature"""
+def compute_max_correlations(features, gz_features, feature_names, gz_feature_names=None, print_argmax=False, exclude_smooth_featured=False):
+    """
+    Compute maximum Spearman correlation between each feature and any GZ feature
+    
+    Args:
+        features: Feature matrix (samples x features)
+        gz_features: Galaxy Zoo features matrix (samples x gz_features) 
+        feature_names: Names of the features
+        gz_feature_names: Optional list of GZ class names (if None, uses indices)
+        print_argmax: If True, print the index/name of the max correlation GZ class
+        exclude_smooth_featured: If True, exclude GZ classes starting with "smooth-or-featured"
+        
+    Returns:
+        Array of maximum absolute correlations for each feature
+    """
     max_correlations = []
+    max_indices = []
+    
+    # Create mask for which GZ features to include
+    if exclude_smooth_featured and gz_feature_names is not None:
+        gz_mask = [not name.startswith('smooth-or-featured') for name in gz_feature_names]
+        if print_argmax:
+            excluded_count = len(gz_feature_names) - sum(gz_mask)
+            print(f"Excluding {excluded_count} smooth-or-featured classes: {sum(gz_mask)}/{len(gz_mask)} GZ classes remaining")
+    else:
+        gz_mask = [True] * gz_features.shape[1]
     
     for i in range(features.shape[1]):
         feature_vals = features[:, i]
         correlations = []
+        valid_indices = []
         
         for j in range(gz_features.shape[1]):
+            # Skip if this GZ class is filtered out
+            if not gz_mask[j]:
+                continue
+                
             gz_vals = gz_features[:, j]
-            # Skip if either feature has no variation
-            if np.std(feature_vals) > 0 and np.std(gz_vals) > 0:
-                corr, _ = spearmanr(feature_vals, gz_vals)
-                if not np.isnan(corr):
-                    correlations.append(abs(corr))
+            # Handle NaN values by finding common valid indices
+            common_mask = ~np.isnan(gz_vals)
+            if np.sum(common_mask) > 10:  # Need at least 10 samples for meaningful correlation
+                common_feature_vals = feature_vals[common_mask]
+                common_gz_vals = gz_vals[common_mask]
+                
+                # Skip if either feature has no variation
+                if np.std(common_feature_vals) > 0 and np.std(common_gz_vals) > 0:
+                    corr, _ = spearmanr(common_feature_vals, common_gz_vals)
+                    if not np.isnan(corr):
+                        correlations.append(abs(corr))
+                        valid_indices.append(j)
+                    else:
+                        correlations.append(0)
+                        valid_indices.append(j)
+                else:
+                    correlations.append(0)
+                    valid_indices.append(j)
+            else:
+                correlations.append(0)
+                valid_indices.append(j)
         
-        max_correlations.append(max(correlations) if correlations else 0)
+        if correlations:
+            max_corr = max(correlations)
+            local_max_idx = correlations.index(max_corr)
+            original_max_idx = valid_indices[local_max_idx]  # Map back to original GZ feature index
+            max_correlations.append(max_corr)
+            max_indices.append(original_max_idx)
+            
+            if print_argmax:
+                if gz_feature_names is not None and original_max_idx < len(gz_feature_names):
+                    gz_class_name = gz_feature_names[original_max_idx].replace('_fraction', '')
+                    print(f"{feature_names[i]}: max_corr={max_corr:.4f}, best_match='{gz_class_name}'")
+                else:
+                    print(f"{feature_names[i]}: max_corr={max_corr:.4f}, best_match_index={original_max_idx}")
+        else:
+            max_correlations.append(0)
+            max_indices.append(0)
     
     return np.array(max_correlations)
 
@@ -172,7 +241,7 @@ def compute_novelty_via_regression(features, gz_features):
     return np.array(novelty_scores)
 
 
-def cache_correlation_computations(cache_path: Path, sae_activations, valid_indices, gz_features, top_sae_features_, group_size_bin_edges, mode='supervised'):
+def cache_correlation_computations(cache_path: Path, sae_activations, valid_indices, gz_features, top_sae_features_, group_size_bin_edges, mode='supervised', gz_feature_cols=None, secondary_features=False):
     """Cache expensive correlation computations for SAE groups"""
     
     if cache_path.exists():
@@ -185,7 +254,9 @@ def cache_correlation_computations(cache_path: Path, sae_activations, valid_indi
         sae_features_g = sae_activations[valid_indices][:, top_sae_features_[g1:g2]].numpy()
         sae_max_corrs_g = compute_max_correlations(
             sae_features_g, gz_features, 
-            [f"SAE_{i}" for i in top_sae_features_[g1:g2]]
+            [f"SAE_{i}" for i in top_sae_features_[g1:g2]],
+            gz_feature_names=gz_feature_cols,
+            exclude_smooth_featured=secondary_features
         )
         cached_correlations.append(sae_max_corrs_g)
     
@@ -240,7 +311,7 @@ def load_supervised_data():
     sae_model = MatryoshkaSAE(**model_config)
     
     # Load the trained weights
-    checkpoint_path = REPO_BASE / 'results/matryoshka_sae/weights/matryoshka_sae_final.pth'
+    checkpoint_path = REPO_BASE / 'results/sae/weights/matryoshka_sae_final.pth'
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     sae_model.load_state_dict(checkpoint)
     sae_model.eval()
@@ -264,8 +335,8 @@ def load_ssl_data():
     # Load MAE MatryoshkaSAE model
     model_config = {
         'input_dim': 384,  # MAE embeddings are 384-dimensional  
-        'group_sizes': [64, 64, 128, 256, 512, 1024],
-        'top_k': 64,
+        'group_sizes': [64, 64, 128, 256, 512, 1024],  # Matching supervised config
+        'top_k': 64,  # Matching supervised config
         'l1_coeff': 0.001,
         'aux_penalty': 0.03,
         'n_batches_to_dead': 256,
@@ -275,7 +346,7 @@ def load_ssl_data():
     sae_model = MatryoshkaSAE(**model_config)
     
     # Load the trained weights for MAE SAE
-    checkpoint_path = REPO_BASE / 'results/mae_analysis/matryoshka_sae/weights/matryoshka_sae_final.pth'
+    checkpoint_path = REPO_BASE / 'results/mae_matryoshka_sae/weights/mae_matryoshka_sae_final.pth'
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     sae_model.load_state_dict(checkpoint)
     sae_model.eval()
@@ -341,8 +412,12 @@ def extract_ssl_gz_features(morphology_df, test_ids):
     return np.array(gz_features), valid_indices, gz_feature_cols
 
 
-def make_supervised_correlation_figure():
-    """Generate supervised_feature_comparison_corr.pdf"""
+def make_supervised_correlation_figure(secondary_features=False):
+    """Generate supervised_feature_comparison_corr.pdf
+    
+    Args:
+        secondary_features: If True, exclude smooth-or-featured classes to focus on secondary GZ features
+    """
     
     # Load data
     test_embeddings, test_ids, sae_model, pca_transformed, gz_dataset = load_supervised_data()
@@ -352,16 +427,26 @@ def make_supervised_correlation_figure():
     top_sae_features, _ = get_top_sae_features(sae_activations)
     
     # Extract Galaxy Zoo features
-    gz_features, valid_indices, _ = extract_supervised_gz_features(gz_dataset, test_ids)
+    gz_features, valid_indices, gz_feature_cols = extract_supervised_gz_features(gz_dataset, test_ids)
     
     # Compute correlations for top 64 features
     sae_features_subset = sae_activations[valid_indices][:, top_sae_features[:64]].numpy()
     sae_max_corrs = compute_max_correlations(sae_features_subset, gz_features, 
-                                           [f"SAE_{i}" for i in top_sae_features[:64]])
+                                           [f"SAE_{i}" for i in top_sae_features[:64]], 
+                                           gz_feature_names=gz_feature_cols, print_argmax=True,
+                                           exclude_smooth_featured=secondary_features)
     
     pca_features_subset = pca_transformed[valid_indices][:, :64]
     pca_max_corrs = compute_max_correlations(pca_features_subset, gz_features, 
-                                           [f"PC_{i}" for i in range(64)])
+                                           [f"PC_{i}" for i in range(64)],
+                                           gz_feature_names=gz_feature_cols, print_argmax=True,
+                                           exclude_smooth_featured=secondary_features)
+
+    # Report summary statistics
+    print(f"\n=== TOP 64 FEATURES CORRELATION SUMMARY ===")
+    suffix_text = " (secondary)" if secondary_features else ""
+    print(f"SAE features{suffix_text}: mean={np.mean(sae_max_corrs):.3f}, std={np.std(sae_max_corrs):.3f}")
+    print(f"PCA features{suffix_text}: mean={np.mean(pca_max_corrs):.3f}, std={np.std(pca_max_corrs):.3f}")
     
     # Create figure
     plt.style.use("default")
@@ -388,9 +473,9 @@ def make_supervised_correlation_figure():
         arrowprops=dict(arrowstyle="->", color="black", lw=1)
     )
     
-    ax.text(0.25, 0.8, "PCA", color=colors["PCA"], fontsize=16, ha="right",
+    ax.text(0.33, 0.8, "PCA", color=colors["PCA"], fontsize=16, ha="right",
              path_effects=[pe.withStroke(linewidth=10, foreground="white")])
-    ax.text(0.50, 0.8, "SAE", color=colors["SAE"], fontsize=16, ha="right",
+    ax.text(0.60, 0.8, "SAE", color=colors["SAE"], fontsize=16, ha="right",
              path_effects=[pe.withStroke(linewidth=10, foreground="white")])
     
     ax.spines["top"].set_visible(False)
@@ -400,13 +485,18 @@ def make_supervised_correlation_figure():
     fig.suptitle("Top 64 features (supervised)", fontsize=16)
     
     plt.tight_layout()
-    output_path = REPO_BASE / 'results/figures/supervised_feature_comparison_corr.pdf'
+    suffix = "_secondary" if secondary_features else ""
+    output_path = REPO_BASE / f'results/figures/supervised_feature_comparison_corr{suffix}.pdf'
     plt.savefig(output_path, bbox_inches='tight', dpi=300)
     plt.close()
 
 
-def make_supervised_correlation_all_figure():
-    """Generate supervised_feature_comparison_corr_all.pdf"""
+def make_supervised_correlation_all_figure(secondary_features=False):
+    """Generate supervised_feature_comparison_corr_all.pdf
+    
+    Args:
+        secondary_features: If True, exclude smooth-or-featured classes to focus on secondary GZ features
+    """
     
     # Load data
     test_embeddings, test_ids, sae_model, pca_transformed, gz_dataset = load_supervised_data()
@@ -416,20 +506,24 @@ def make_supervised_correlation_all_figure():
     top_sae_features_, _ = get_top_sae_features(sae_activations, n_features=sae_activations.shape[1])
     
     # Extract Galaxy Zoo features
-    gz_features, valid_indices, _ = extract_supervised_gz_features(gz_dataset, test_ids)
+    gz_features, valid_indices, gz_feature_cols = extract_supervised_gz_features(gz_dataset, test_ids)
     
     # Use caching for expensive correlation computations
     group_size_bin_edges = [0, 64, 128, 256, 512, 1024, 2048]
-    cache_path = REPO_BASE / 'results/.cache/supervised_correlations_all.pkl'
+    suffix = "_secondary" if secondary_features else ""
+    cache_path = REPO_BASE / f'results/.cache/supervised_correlations_all{suffix}.pkl'
     cached_correlations = cache_correlation_computations(
         cache_path, sae_activations, valid_indices, gz_features, 
-        top_sae_features_, group_size_bin_edges, 'supervised'
+        top_sae_features_, group_size_bin_edges, 'supervised',
+        gz_feature_cols=gz_feature_cols, secondary_features=secondary_features
     )
     
     # Compute PCA correlations for first group (0-64)
     pca_features_g = pca_transformed[valid_indices][:, 0:64]
     pca_max_corrs_g = compute_max_correlations(pca_features_g, gz_features, 
-                                              [f"PC_{i}" for i in range(0, 64)])
+                                              [f"PC_{i}" for i in range(0, 64)],
+                                              gz_feature_names=gz_feature_cols,
+                                              exclude_smooth_featured=secondary_features)
     
     # Create figure
     plt.style.use("default")
@@ -443,20 +537,20 @@ def make_supervised_correlation_all_figure():
     # Plot PCA
     sns.kdeplot(pca_max_corrs_g, ax=ax, color="white", lw=2, bw_adjust=0.7)
     sns.kdeplot(pca_max_corrs_g, ax=ax, color=colors["PCA"], ls="--", lw=0.5, bw_adjust=0.7)
-    
-    # Plot SAE groups
-    for z, (c, sae_max_corrs_g, g1, g2) in enumerate(zip(cs, cached_correlations, group_size_bin_edges[:-1], group_size_bin_edges[1:])):
-        sns.kdeplot(sae_max_corrs_g, ax=ax, color=c, lw=2, bw_adjust=0.7)
-        ax.text(0.42, 6.2-0.8*z, f"{g1}$-${g2}", color=c, fontsize=12, ha="left")
-    
+
     ax.set_xlim(0, 1)
     ax.set_xlabel("Max Spearman Correlation with GZ")
     ax.set_ylabel("Density")
     
+    # Plot SAE groups
+    for z, (c, sae_max_corrs_g, g1, g2) in enumerate(zip(cs, cached_correlations, group_size_bin_edges[:-1], group_size_bin_edges[1:])):
+        sns.kdeplot(sae_max_corrs_g, ax=ax, color=c, lw=2, bw_adjust=0.7)
+        ax.text(0.42, 0.68-0.08*z, f"{g1}$-${g2}", color=c, fontsize=12, ha="left", transform=ax.transAxes)
+    
     ax.annotate(
         "More aligned with GZ",
         xy=(0.95, 0.9),
-        xytext=(0.15, 0.9),
+        xytext=(0.18, 0.9),
         xycoords="axes fraction",
         textcoords="axes fraction",
         ha="left", va="center",
@@ -464,7 +558,7 @@ def make_supervised_correlation_all_figure():
         arrowprops=dict(arrowstyle="->", color="black", lw=1)
     )
     
-    ax.text(0.42, 7, "SAE Activation Groups", color=colors["SAE"], fontsize=12, ha="left")
+    ax.text(0.38, 0.76, "SAE Activation Groups", color=colors["SAE"], fontsize=12, ha="left", transform=ax.transAxes)
     
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -473,7 +567,8 @@ def make_supervised_correlation_all_figure():
     fig.suptitle("All features (supervised)", fontsize=16)
     
     plt.tight_layout()
-    output_path = REPO_BASE / 'results/figures/supervised_feature_comparison_corr_all.pdf'
+    suffix = "_secondary" if secondary_features else ""
+    output_path = REPO_BASE / f'results/figures/supervised_feature_comparison_corr_all{suffix}.pdf'
     plt.savefig(output_path, bbox_inches='tight', dpi=300)
     plt.close()
 
@@ -515,16 +610,17 @@ def make_supervised_novelty_all_figure():
     # Plot PCA
     sns.kdeplot(pca_novelty_g, ax=ax, color="white", lw=2, bw_adjust=0.7)
     sns.kdeplot(pca_novelty_g, ax=ax, color=colors["PCA"], ls="--", lw=0.5, bw_adjust=0.7)
-    
-    # Plot SAE groups
-    for z, (c, sae_novelty_g, g1, g2) in enumerate(zip(cs, cached_novelty, group_size_bin_edges[:-1], group_size_bin_edges[1:])):
-        sns.kdeplot(sae_novelty_g, ax=ax, color=c, lw=2, bw_adjust=0.7)
-        ax.text(0.09, 10.2-1.4*z, f"{g1}$-${g2}", color=c, fontsize=12, ha="left")
-    
+
     ax.set_xlim(0, 1)
     ax.set_xlabel("Unexplained GZ Variance ($1-R^2$)")
     ax.set_ylabel("Density")
-    
+
+
+    # Plot SAE groups
+    for z, (c, sae_novelty_g, g1, g2) in enumerate(zip(cs, cached_novelty, group_size_bin_edges[:-1], group_size_bin_edges[1:])):
+        sns.kdeplot(sae_novelty_g, ax=ax, color=c, lw=2, bw_adjust=0.7)
+        ax.text(.12, 0.68-0.08*z, f"{g1}$-${g2}", color=c, fontsize=12, ha="left", transform=ax.transAxes)
+
     ax.annotate(
         "Less predictable features",
         xy=(0.9, 0.9),
@@ -536,7 +632,7 @@ def make_supervised_novelty_all_figure():
         arrowprops=dict(arrowstyle="->", color="black", lw=1)
     )
     
-    ax.text(0.09, 11.6, "SAE Activation Groups", color=colors["SAE"], fontsize=12, ha="left")
+    ax.text(0.08, 0.76, "SAE Activation Groups", color=colors["SAE"], fontsize=12, ha="left", transform=ax.transAxes)
     
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -550,8 +646,74 @@ def make_supervised_novelty_all_figure():
     plt.close()
 
 
-def make_ssl_correlation_figure():
-    """Generate ssl_feature_comparison_corr.pdf"""
+def make_supervised_novelty_figure():
+    """Generate supervised_feature_comparison_novelty.pdf"""
+    
+    # Load data
+    test_embeddings, test_ids, sae_model, pca_transformed, gz_dataset = load_supervised_data()
+    
+    # Compute SAE activations and get top features
+    sae_activations = compute_sae_activations(sae_model, test_embeddings)
+    top_sae_features, _ = get_top_sae_features(sae_activations)
+    
+    # Extract Galaxy Zoo features
+    gz_features, valid_indices, _ = extract_supervised_gz_features(gz_dataset, test_ids)
+    
+    # Compute novelty for top 64 features
+    sae_features_subset = sae_activations[valid_indices][:, top_sae_features[:64]].numpy()
+    sae_novelty = compute_novelty_via_regression(sae_features_subset, gz_features)
+    
+    pca_features_subset = pca_transformed[valid_indices][:, :64]
+    pca_novelty = compute_novelty_via_regression(pca_features_subset, gz_features)
+    
+    # Create figure
+    plt.style.use("default")
+    sns.set_style("white")
+    
+    fig, ax = plt.subplots(1, 1, figsize=(4, 3.5), dpi=300)
+    
+    colors = {"PCA": "#003f5c", "SAE": "#ff6361"}
+    
+    sns.kdeplot(pca_novelty, ax=ax, color=colors["PCA"], lw=2, bw_adjust=0.7, label="PCA")
+    sns.kdeplot(sae_novelty, ax=ax, color=colors["SAE"], lw=2, bw_adjust=0.7, label="SAE")
+    ax.set_xlim(0, 1)
+    ax.set_xlabel("Unexplained GZ Variance ($1-R^2$)")
+    ax.set_ylabel("Density")
+    
+    ax.annotate(
+        "Less predictable features",
+        xy=(0.85, 0.9),
+        xytext=(0.05, 0.9),
+        xycoords="axes fraction",
+        textcoords="axes fraction",
+        ha="left", va="center",
+        fontsize=12,
+        arrowprops=dict(arrowstyle="->", color="black", lw=1)
+    )
+    
+    ax.text(0.82, 0.8, "PCA", color=colors["PCA"], fontsize=16, ha="right",
+             path_effects=[pe.withStroke(linewidth=10, foreground="white")])
+    ax.text(0.56, 0.8, "SAE", color=colors["SAE"], fontsize=16, ha="right",
+             path_effects=[pe.withStroke(linewidth=10, foreground="white")])
+    
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", which="major", labelsize=10)
+    
+    fig.suptitle("Top 64 features (supervised)", fontsize=16)
+    
+    plt.tight_layout()
+    output_path = REPO_BASE / 'results/figures/supervised_feature_comparison_novelty.pdf'
+    plt.savefig(output_path, bbox_inches='tight', dpi=300)
+    plt.close()
+
+
+def make_ssl_correlation_figure(secondary_features=False):
+    """Generate ssl_feature_comparison_corr.pdf
+    
+    Args:
+        secondary_features: If True, exclude smooth-or-featured classes to focus on secondary GZ features
+    """
     
     # Load data
     test_embeddings, test_ids, sae_model, pca_transformed, morphology_df, gz_dataset = load_ssl_data()
@@ -561,16 +723,26 @@ def make_ssl_correlation_figure():
     top_sae_features, _ = get_top_sae_features(sae_activations)
     
     # Extract morphology features
-    gz_features, valid_indices, _ = extract_ssl_gz_features(morphology_df, test_ids)
+    gz_features, valid_indices, gz_feature_cols = extract_ssl_gz_features(morphology_df, test_ids)
     
     # Compute correlations for top 64 features
     sae_features_subset = sae_activations[valid_indices][:, top_sae_features[:64]].numpy()
     sae_max_corrs = compute_max_correlations(sae_features_subset, gz_features, 
-                                           [f"MAE_SAE_{i}" for i in top_sae_features[:64]])
+                                           [f"MAE_SAE_{i}" for i in top_sae_features[:64]],
+                                           gz_feature_names=gz_feature_cols, print_argmax=True,
+                                           exclude_smooth_featured=secondary_features)
     
     pca_features_subset = pca_transformed[valid_indices][:, :64]
     pca_max_corrs = compute_max_correlations(pca_features_subset, gz_features, 
-                                           [f"MAE_PC_{i}" for i in range(64)])
+                                           [f"MAE_PC_{i}" for i in range(64)],
+                                           gz_feature_names=gz_feature_cols, print_argmax=True,
+                                           exclude_smooth_featured=secondary_features)
+
+    # Report summary statistics  
+    print(f"\n=== TOP 64 MAE FEATURES CORRELATION SUMMARY ===")
+    suffix_text = " (secondary)" if secondary_features else ""
+    print(f"MAE SAE features{suffix_text}: mean={np.mean(sae_max_corrs):.3f}, std={np.std(sae_max_corrs):.3f}")
+    print(f"MAE PCA features{suffix_text}: mean={np.mean(pca_max_corrs):.3f}, std={np.std(pca_max_corrs):.3f}")
     
     # Create figure
     plt.style.use("default")
@@ -583,12 +755,13 @@ def make_ssl_correlation_figure():
     sns.kdeplot(pca_max_corrs, ax=ax, color=colors["PCA"], lw=2, bw_adjust=0.7, label="PCA")
     sns.kdeplot(sae_max_corrs, ax=ax, color=colors["SAE"], lw=2, bw_adjust=0.7, label="SAE")
     ax.set_xlim(0, 1)
+    ax.set_ylim(0, ax.get_ylim()[1]*1.2) # yeah sorry
     ax.set_xlabel("Max Spearman Correlation with GZ")
     ax.set_ylabel("Density")
     
-    ax.text(0.3, 0.8, "PCA", color=colors["PCA"], fontsize=16, ha="right",
-             path_effects=[pe.withStroke(linewidth=5, foreground="white")])
-    ax.text(0.63, 0.8, "SAE", color=colors["SAE"], fontsize=16, ha="right",
+    ax.text(0.26, 0.8, "PCA", color=colors["PCA"], fontsize=16, ha="right",
+             path_effects=[pe.withStroke(linewidth=10, foreground="white")])
+    ax.text(0.42, 0.8, "SAE", color=colors["SAE"], fontsize=16, ha="right",
              path_effects=[pe.withStroke(linewidth=10, foreground="white")])
     
     ax.spines["top"].set_visible(False)
@@ -598,13 +771,18 @@ def make_ssl_correlation_figure():
     fig.suptitle("(self-supervised)", fontsize=16)
     
     plt.tight_layout()
-    output_path = REPO_BASE / 'results/figures/ssl_feature_comparison_corr.pdf'
+    suffix = "_secondary" if secondary_features else ""
+    output_path = REPO_BASE / f'results/figures/ssl_feature_comparison_corr{suffix}.pdf'
     plt.savefig(output_path, bbox_inches='tight', dpi=300)
     plt.close()
 
 
-def make_ssl_correlation_all_figure():
-    """Generate ssl_feature_comparison_corr_all.pdf"""
+def make_ssl_correlation_all_figure(secondary_features=False):
+    """Generate ssl_feature_comparison_corr_all.pdf
+    
+    Args:
+        secondary_features: If True, exclude smooth-or-featured classes to focus on secondary GZ features
+    """
     
     # Load data
     test_embeddings, test_ids, sae_model, pca_transformed, morphology_df, gz_dataset = load_ssl_data()
@@ -614,20 +792,24 @@ def make_ssl_correlation_all_figure():
     top_sae_features_, _ = get_top_sae_features(sae_activations, n_features=sae_activations.shape[1])
     
     # Extract morphology features
-    gz_features, valid_indices, _ = extract_ssl_gz_features(morphology_df, test_ids)
+    gz_features, valid_indices, gz_feature_cols = extract_ssl_gz_features(morphology_df, test_ids)
     
     # Use caching for expensive correlation computations
     group_size_bin_edges = [0, 64, 128, 256, 512, 1024, 2048]
-    cache_path = REPO_BASE / 'results/.cache/ssl_correlations_all.pkl'
+    suffix = "_secondary" if secondary_features else ""
+    cache_path = REPO_BASE / f'results/.cache/ssl_correlations_all{suffix}.pkl'
     cached_correlations = cache_correlation_computations(
         cache_path, sae_activations, valid_indices, gz_features, 
-        top_sae_features_, group_size_bin_edges, 'ssl'
+        top_sae_features_, group_size_bin_edges, 'ssl',
+        gz_feature_cols=gz_feature_cols, secondary_features=secondary_features
     )
     
     # Compute PCA correlations for first group (0-64)
     pca_features_g = pca_transformed[valid_indices][:, 0:64]
     pca_max_corrs_g = compute_max_correlations(pca_features_g, gz_features, 
-                                              [f"PC_{i}" for i in range(0, 64)])
+                                              [f"PC_{i}" for i in range(0, 64)],
+                                              gz_feature_names=gz_feature_cols,
+                                              exclude_smooth_featured=secondary_features)
     
     # Create figure
     plt.style.use("default")
@@ -647,6 +829,7 @@ def make_ssl_correlation_all_figure():
         sns.kdeplot(sae_max_corrs_g, ax=ax, color=c, lw=2, bw_adjust=0.7)
     
     ax.set_xlim(0, 1)
+    ax.set_ylim(0, ax.get_ylim()[1]*1.2)
     ax.set_xlabel("Max Spearman Correlation with GZ")
     ax.set_ylabel("Density")
     
@@ -668,7 +851,8 @@ def make_ssl_correlation_all_figure():
     fig.suptitle("(self-supervised)", fontsize=16)
     
     plt.tight_layout()
-    output_path = REPO_BASE / 'results/figures/ssl_feature_comparison_corr_all.pdf'
+    suffix = "_secondary" if secondary_features else ""
+    output_path = REPO_BASE / f'results/figures/ssl_feature_comparison_corr_all{suffix}.pdf'
     plt.savefig(output_path, bbox_inches='tight', dpi=300)
     plt.close()
 
@@ -742,18 +926,117 @@ def make_ssl_novelty_all_figure():
     plt.close()
 
 
-def make_feature_gallery(feature_type, mode, feature_id, reverse=False, prefix=None):
+def compute_sae_explained_variance(sae_activations, n_components=64):
+    """Compute explained variance ratios for SAE activations using PCA decomposition"""
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+    
+    # Standardize SAE activations
+    scaler = StandardScaler()
+    sae_activations_scaled = scaler.fit_transform(sae_activations.numpy())
+    
+    # Perform PCA on SAE activations to get explained variance
+    pca = PCA(n_components=n_components)
+    pca.fit(sae_activations_scaled)
+    
+    return pca.explained_variance_ratio_
+
+
+def make_cumulative_explained_variance_figure(mode='supervised'):
+    """Generate cumulative explained variance comparison for powers of 2 components"""
+    
+    component_counts = [1, 2, 4, 8, 16, 32, 64]
+        
+    plt.style.use("default")
+    sns.set_style("white")
+    
+    fig, ax = plt.subplots(1, 1, figsize=(4, 3.5), dpi=300)
+    
+    if mode == 'supervised':
+        # Load supervised data
+        test_embeddings, test_ids, sae_model, pca_transformed, gz_dataset = load_supervised_data()
+        
+        # Load PCA explained variance ratios
+        pca_explained_var = np.load(REPO_BASE / 'results/pca/pca_explained_variance_ratio.npy')
+        
+        # Compute SAE activations and their explained variance
+        sae_activations = compute_sae_activations(sae_model, test_embeddings)
+        sae_explained_var = compute_sae_explained_variance(sae_activations)
+        fig.suptitle(f"Explained Variance (supervised)", fontsize=16)
+        
+    elif mode == 'ssl':
+        # Load SSL data
+        test_embeddings, test_ids, sae_model, pca_transformed, morphology_df, gz_dataset = load_ssl_data()
+        
+        # Load MAE PCA explained variance ratios
+        pca_explained_var = np.load(REPO_BASE / 'results/mae_analysis/pca/pca_explained_variance_ratio.npy')
+        
+        # Compute MAE SAE activations and their explained variance
+        sae_activations = compute_sae_activations(sae_model, test_embeddings)
+        sae_explained_var = compute_sae_explained_variance(sae_activations)
+        
+        fig.suptitle(f"(self-supervised)", fontsize=16)
+        
+    else:
+        raise ValueError("mode must be 'supervised' or 'ssl'")
+    
+    # Compute cumulative explained variance for each component count
+    pca_cumulative = []
+    sae_cumulative = []
+    
+    for n_comp in component_counts:
+        pca_cumulative.append(np.sum(pca_explained_var[:n_comp]))
+        sae_cumulative.append(np.sum(sae_explained_var[:n_comp]))
+
+    
+    colors = {"PCA": "#003f5c", "SAE": "#ff6361"}
+    
+    # Plot lines
+    ax.plot(component_counts, pca_cumulative, '-', color=colors["PCA"], 
+            lw=2, markersize=6, label="PCA")
+    ax.plot(component_counts, sae_cumulative, '-', color=colors["SAE"], 
+            lw=2, markersize=6, label="SAE")
+    
+    ax.set_xscale('log', base=2)
+    ax.set_xticks(component_counts)
+    ax.set_xticklabels([str(x) for x in component_counts])
+    ax.set_xlim(0.8, 80)
+    ax.set_ylim(0, 1)
+    
+    ax.set_xlabel("Number of Components")
+    ax.set_ylabel("Cumulative Explained Variance")
+    
+    ax.grid(True, alpha=0.15)
+    
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", which="major", labelsize=12)
+    
+    # Add text labels instead of legend
+    ax.text(32, pca_cumulative[5], "PCA", color=colors["PCA"], ha="center", fontsize=16,
+            path_effects=[pe.withStroke(linewidth=10, foreground="white")])
+    ax.text(32, sae_cumulative[5] - 0.04, "SAE", color=colors["SAE"], ha="center", fontsize=16,
+            path_effects=[pe.withStroke(linewidth=10, foreground="white")])
+    
+    plt.tight_layout()
+    output_path = REPO_BASE / f'results/figures/cumulative_explained_variance_{mode}.pdf'
+    plt.savefig(output_path, bbox_inches='tight', dpi=300)
+    plt.close()
+
+
+def make_feature_gallery(feature_type, mode, feature_id, n_activations=10, reverse=False, prefix=None):
     """
-    Create a single-row gallery of 10 galaxy images for a specific feature.
+    Create a single-row gallery of n_activations (10) galaxy images for a specific feature.
     
     Args:
         feature_type: 'sae' or 'pca'
         mode: 'supervised' or 'ssl'  
-        feature_id: The specific feature number/ID
+        feature_id: The specific feature number/ID (for PCA: component index, for SAE: rank in top features)
+        n_activations: number of images to show
         reverse: If True, show images with lowest activations (for PCA negative direction)
         prefix: Optional string prefix for the output filename (e.g., "00", "01")
     
-    Saves to: results/figures/gallery/{prefix}-{mode}-{feature_type}-{feature_id}.pdf
+    Saves to: results/figures/gallery/{prefix}-{mode}-{feature_type}-{top_feature_id}.pdf
     """
     
     if mode == 'supervised':
@@ -764,10 +1047,13 @@ def make_feature_gallery(feature_type, mode, feature_id, reverse=False, prefix=N
         id_to_idx = {item['id_str']: idx for idx, item in enumerate(gz_dataset)}
         
         if feature_type == 'sae':
-            # Compute SAE activations
+            # Compute SAE activations and get top features
             sae_activations = compute_sae_activations(sae_model, test_embeddings)
-            feature_activations = sae_activations[:, feature_id].numpy()
+            top_sae_features, _ = get_top_sae_features(sae_activations)
+            top_feature_id = top_sae_features[feature_id].item()  # Get actual SAE feature index
+            feature_activations = sae_activations[:, top_feature_id].numpy()
         elif feature_type == 'pca':
+            top_feature_id = feature_id  # For PCA, use the component index directly
             feature_activations = pca_transformed[:, feature_id]
         else:
             raise ValueError("feature_type must be 'sae' or 'pca'")
@@ -780,10 +1066,13 @@ def make_feature_gallery(feature_type, mode, feature_id, reverse=False, prefix=N
         gz_id_to_idx = {item['id_str']: idx for idx, item in enumerate(gz_dataset)}
         
         if feature_type == 'sae':
-            # Compute SAE activations
+            # Compute SAE activations and get top features
             sae_activations = compute_sae_activations(sae_model, test_embeddings)
-            feature_activations = sae_activations[:, feature_id].numpy()
+            top_sae_features, _ = get_top_sae_features(sae_activations)
+            top_feature_id = top_sae_features[feature_id].item()  # Get actual SAE feature index
+            feature_activations = sae_activations[:, top_feature_id].numpy()
         elif feature_type == 'pca':
+            top_feature_id = feature_id  # For PCA, use the component index directly
             feature_activations = pca_transformed[:, feature_id]
         else:
             raise ValueError("feature_type must be 'sae' or 'pca'")
@@ -791,16 +1080,14 @@ def make_feature_gallery(feature_type, mode, feature_id, reverse=False, prefix=N
     else:
         raise ValueError("mode must be 'supervised' or 'ssl'")
     
-    # Get activations for this feature
+    # Get top 10 (possibly reversed) activations for this feature
     if reverse:
-        # Show most negative activations (lowest values) - first 10 from sorted array
-        top_indices = np.argsort(feature_activations)[:10]
+        top_indices = np.argsort(feature_activations)[:n_activations]
     else:
-        # Show most positive activations (highest values) - last 10 from sorted array, reversed
-        top_indices = np.argsort(feature_activations)[-10:][::-1]
+        top_indices = np.argsort(feature_activations)[-n_activations:][::-1]
     
     # Create figure with single row of images
-    fig, axes = plt.subplots(1, 10, figsize=(20, 2), dpi=300)
+    fig, axes = plt.subplots(1, n_activations, figsize=(2*n_activations, 2), dpi=300)
     
     for i, ax in enumerate(axes):
         if i < len(top_indices):
@@ -859,9 +1146,9 @@ def make_feature_gallery(feature_type, mode, feature_id, reverse=False, prefix=N
     
     # Add prefix to filename if provided
     if prefix:
-        filename = f"{prefix}-{mode}-{feature_type}-{feature_id}{suffix}.pdf"
+        filename = f"{prefix}-{mode}-{feature_type}-{top_feature_id}{suffix}.pdf"
     else:
-        filename = f"{mode}-{feature_type}-{feature_id}{suffix}.pdf"
+        filename = f"{mode}-{feature_type}-{top_feature_id}{suffix}.pdf"
     
     output_path = output_dir / filename
     plt.savefig(output_path, bbox_inches='tight', pad_inches=0, dpi=300)
@@ -871,14 +1158,36 @@ def make_feature_gallery(feature_type, mode, feature_id, reverse=False, prefix=N
 if __name__ == "__main__":
     """Generate all figures"""
     
-    print("Generating supervised figures...")
-    make_supervised_correlation_figure()
-    make_supervised_correlation_all_figure()
-    make_supervised_novelty_all_figure()
+    # Initialize reproducible random state
+    set_seed(42)
+    configure_torch_reproducibility()
     
-    print("Generating SSL figures...")
-    make_ssl_correlation_figure()
+    # print("Generating supervised figures...")
+    # make_supervised_correlation_figure()
+    # make_supervised_correlation_figure(secondary_features=True)
+    # make_supervised_novelty_figure()
+    # make_supervised_correlation_all_figure()
+    # make_supervised_correlation_all_figure(secondary_features=True)
+    # make_supervised_novelty_all_figure()
+    
+    # print("Generating SSL figures...")
+    # make_ssl_correlation_figure()
+    # make_ssl_correlation_figure(secondary_features=True)
     make_ssl_correlation_all_figure()
-    make_ssl_novelty_all_figure()
+    # make_ssl_correlation_all_figure(secondary_features=True)
+    # make_ssl_novelty_all_figure()
     
+    # print("Generating cumulative explained variance figures...")
+    # make_cumulative_explained_variance_figure(mode='supervised')
+    # make_cumulative_explained_variance_figure(mode='ssl')
+
+    # # Generate image galleries for Supervised + SSL modes for both PCA and SAE
+    # print("Generating feature galleries for top 5 features...")
+    # for i in range(5):
+    #     
+    #     prefix = f"{i:02d}"
+    #     for mode in ['supervised', 'ssl']:
+    #         make_feature_gallery('pca', mode, i, prefix=prefix)
+    #         make_feature_gallery('sae', mode, i, prefix=prefix)
+        
     print("All figures generated successfully!")

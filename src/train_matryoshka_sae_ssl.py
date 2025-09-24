@@ -28,228 +28,28 @@ import tomli
 import wandb
 from datasets import load_dataset
 
-
-class MatryoshkaSAE(nn.Module):
-    """
-    Matryoshka Sparse Autoencoder that learns a sparse, hierarchical dictionary
-    of features from input embeddings.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        group_sizes: List[int],
-        top_k: int,
-        l1_coeff: float = 1e-3,
-        aux_penalty: float = 1e-2,
-        n_batches_to_dead: int = 20,
-        aux_k_multiplier: int = 16,
-    ):
-        super().__init__()
-        self.input_dim = input_dim
-        self.group_sizes = group_sizes
-        self.total_dict_size = sum(group_sizes)
-        self.top_k = top_k
-        self.l1_coeff = l1_coeff
-        self.aux_penalty = aux_penalty
-        self.n_batches_to_dead = n_batches_to_dead
-        self.aux_k_multiplier = aux_k_multiplier
-
-        self.b_dec = nn.Parameter(torch.zeros(self.input_dim))
-        self.b_enc = nn.Parameter(torch.zeros(self.total_dict_size))
-
-        self.W_enc = nn.Parameter(
-            torch.nn.init.kaiming_uniform_(torch.empty(self.input_dim, self.total_dict_size))
-        )
-        self.W_dec = nn.Parameter(
-            torch.nn.init.kaiming_uniform_(torch.empty(self.total_dict_size, self.input_dim))
-        )
-
-        with torch.no_grad():
-            self.W_dec.data = self.W_enc.t().clone()
-            self.W_dec.data /= self.W_dec.data.norm(dim=-1, keepdim=True)
-
-        self.register_buffer(
-            "num_batches_not_active", torch.zeros(self.total_dict_size, dtype=torch.long)
-        )
-        
-        self.group_indices = [0] + list(np.cumsum(self.group_sizes))
-
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        x_cent = x - self.b_dec
-        
-        pre_acts = x_cent @ self.W_enc + self.b_enc
-        acts = F.relu(pre_acts)
-
-        batch_size = x.shape[0]
-        n_to_keep = self.top_k * batch_size
-
-        top_k_values, top_k_indices = torch.topk(acts.flatten(), k=n_to_keep, sorted=False)
-        
-        acts_topk = torch.zeros_like(acts.flatten()).scatter_(0, top_k_indices, top_k_values)
-        acts_topk = acts_topk.view_as(acts)
-
-        intermediate_reconstructions = []
-        current_reconstruction = self.b_dec.expand_as(x)
-        
-        for i in range(len(self.group_sizes)):
-            start_idx, end_idx = self.group_indices[i], self.group_indices[i+1]
-            
-            group_acts = acts_topk[:, start_idx:end_idx]
-            group_W_dec = self.W_dec[start_idx:end_idx, :]
-            
-            current_reconstruction = current_reconstruction + (group_acts @ group_W_dec)
-            intermediate_reconstructions.append(current_reconstruction.clone())
-            
-        final_reconstruction = current_reconstruction
-
-        l2_losses = [(recon.float() - x.float()).pow(2).mean() for recon in intermediate_reconstructions]
-        mean_l2_loss = torch.stack(l2_losses).mean()
-        l1_loss = self.l1_coeff * torch.norm(acts_topk, p=1, dim=-1).mean()
-        aux_loss = self.get_auxiliary_loss(x, final_reconstruction, acts)
-        total_loss = mean_l2_loss + l1_loss + aux_loss
-        
-        l0_norm = (acts_topk > 0).float().sum(dim=-1).mean()
-
-        return {
-            "loss": total_loss,
-            "l2_loss": mean_l2_loss,
-            "l1_loss": l1_loss,
-            "aux_loss": aux_loss,
-            "l0_norm": l0_norm,
-            "feature_acts": acts_topk,
-            "final_reconstruction": final_reconstruction
-        }
-
-    @torch.no_grad()
-    def update_inactive_features(self, feature_acts: torch.Tensor):
-        active_features_mask = feature_acts.sum(dim=0) > 0
-        self.num_batches_not_active[~active_features_mask] += 1
-        self.num_batches_not_active[active_features_mask] = 0
-
-    def get_auxiliary_loss(
-        self, x: torch.Tensor, final_reconstruction: torch.Tensor, dense_acts: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Calculates a loss to encourage "dead" features to explain the residual
-        (the part of the input not explained by the main reconstruction). This is a
-        key mechanism for preventing feature collapse during training.
-        """
-        dead_features_mask = self.num_batches_not_active >= self.n_batches_to_dead
-        
-        if not dead_features_mask.any():
-            return torch.tensor(0.0, device=x.device)
-            
-        residual = (x.float() - final_reconstruction.float()).detach()
-        dead_acts = dense_acts[:, dead_features_mask]
-        
-        k_aux = self.top_k * self.aux_k_multiplier
-        n_to_keep_aux = k_aux * x.shape[0]
-
-        if dead_acts.numel() == 0 or n_to_keep_aux == 0:
-            return torch.tensor(0.0, device=x.device)
-
-        n_to_keep_aux = min(n_to_keep_aux, dead_acts.numel())
-        top_k_aux_values, _ = torch.topk(dead_acts.flatten(), k=n_to_keep_aux)
-        
-        min_top_k_val = top_k_aux_values[-1]
-        acts_aux = F.relu(dead_acts - min_top_k_val)
-        
-        recon_aux = acts_aux @ self.W_dec[dead_features_mask, :]
-        aux_loss = self.aux_penalty * (recon_aux.float() - residual.float()).pow(2).mean()
-        
-        return aux_loss
-
-    @torch.no_grad()
-    def make_decoder_weights_and_grad_unit_norm(self):
-        """
-        Normalizes decoder weights and projects their gradients to be orthogonal
-        to the weights. This is a important step for training stability, ensuring
-        the update step does not change the norm of the decoder weights.
-        """
-        if self.W_dec.grad is None:
-            return
-            
-        W_dec_normed = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
-        W_dec_grad_proj = (self.W_dec.grad * W_dec_normed).sum(-1, keepdim=True) * W_dec_normed
-        self.W_dec.grad -= W_dec_grad_proj
-        self.W_dec.data = W_dec_normed
+# Import shared utilities
+try:
+    from .models import MatryoshkaSAE
+    from .utils import (
+        set_seed, configure_torch_reproducibility,
+        load_config, get_ssl_dataloaders, MAEEmbeddingDataset
+    )
+except ImportError:
+    # When running as script directly
+    import sys
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).parent))
+    from models import MatryoshkaSAE
+    from utils import (
+        set_seed, configure_torch_reproducibility,
+        load_config, get_ssl_dataloaders, MAEEmbeddingDataset
+    )
 
 
-class MAEEmbeddingDataset(Dataset):
-    """Dataset for MAE embeddings from Hugging Face with GZ labels."""
-    
-    def __init__(self, gz_dataset, mae_dataset, embedding_block: str = 'pooled_features_block_11', normalize: bool = True):
-        # Create crossmatch based on id_str
-        gz_df = gz_dataset.to_pandas()
-        mae_df = mae_dataset.to_pandas()
-        
-        # Inner join on id_str to get matched data
-        merged_df = pd.merge(gz_df, mae_df, on='id_str', how='inner')
-        
-        logging.info(f"Original GZ dataset size: {len(gz_df)}")
-        logging.info(f"Original MAE dataset size: {len(mae_df)}")
-        logging.info(f"Crossmatched dataset size: {len(merged_df)}")
-        
-        # Extract embeddings
-        embeddings_list = merged_df[embedding_block].tolist()
-        self.embeddings = torch.tensor(embeddings_list, dtype=torch.float32)
-        
-        # Store other data for potential use
-        self.id_strs = merged_df['id_str'].tolist()
-        self.gz_data = merged_df
-        
-        if normalize:
-            mean = self.embeddings.mean(0, keepdim=True)
-            std = self.embeddings.std(0, keepdim=True)
-            self.embeddings = (self.embeddings - mean) / (std + 1e-5)
-            
-        logging.info(f"Embedding shape: {self.embeddings.shape}")
-            
-    def __len__(self):
-        return len(self.embeddings)
-        
-    def __getitem__(self, idx):
-        return self.embeddings[idx]
-    
-    def get_id_str(self, idx):
-        return self.id_strs[idx]
+# MatryoshkaSAE class now imported from models module
 
 
-def load_config(config_path: str = "mae_matryoshka_sae_config.toml", train: bool = False) -> Dict[str, Any]:
-    with open(config_path, "rb") as f:
-        toml_config = tomli.load(f)
-    
-    config = {
-        "INPUT_DIM": toml_config["model"]["input_dim"],
-        "GROUP_SIZES": toml_config["model"]["group_sizes"],
-        "TOP_K": toml_config["model"]["top_k"],
-        "L1_COEFF": toml_config["model"]["l1_coeff"],
-        "AUX_PENALTY": toml_config["model"]["aux_penalty"],
-        "N_BATCHES_TO_DEAD": toml_config["model"]["n_batches_to_dead"],
-        "AUX_K_MULTIPLIER": toml_config["model"]["aux_k_multiplier"],
-        "EPOCHS": toml_config["training"]["epochs"] if train else 0,
-        "LEARNING_RATE": toml_config["training"]["learning_rate"],
-        "SAE_BATCH_SIZE": toml_config["training"]["batch_size"],
-        "GZ_DATASET_NAME": toml_config["data"]["gz_dataset_name"],
-        "GZ_CONFIG_NAME": toml_config["data"]["gz_config_name"],
-        "MAE_DATASET_NAME": toml_config["data"]["mae_dataset_name"],
-        "EMBEDDING_BLOCK": toml_config["data"]["embedding_block"],
-        "RANDOM_SEED": toml_config["data"]["random_seed"],
-        "BASE_RESULTS_DIR": Path(toml_config["output"]["results_dir"]),
-        "MODEL_FILENAME": toml_config["output"]["model_filename"],
-        "WANDB_PROJECT": toml_config["output"]["wandb_project"],
-        "MAX_FEATURES_TO_VISUALIZE": toml_config["visualization"]["max_features_to_visualize"],
-        "TOP_IMAGES_PER_FEATURE": toml_config["visualization"]["top_images_per_feature"],
-    }
-    
-    device_config = toml_config["training"]["device"]
-    if device_config == "auto":
-        config["DEVICE"] = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        config["DEVICE"] = device_config
-        
-    return config
 
 
 def setup_run_directory(base_dir: Path) -> Dict[str, Path]:
@@ -276,43 +76,6 @@ def setup_logging(log_file: Path):
     )
 
 
-def get_dataloaders(config: Dict[str, Any]) -> Tuple[DataLoader, DataLoader, MAEEmbeddingDataset, MAEEmbeddingDataset]:
-    logging.info("Loading GZ and MAE datasets from Hugging Face...")
-    
-    # Load GZ dataset with labels
-    logging.info(f"Loading GZ dataset: {config['GZ_DATASET_NAME']} with config {config['GZ_CONFIG_NAME']}")
-    gz_train = load_dataset(config["GZ_DATASET_NAME"], config["GZ_CONFIG_NAME"], split="train")
-    gz_test = load_dataset(config["GZ_DATASET_NAME"], config["GZ_CONFIG_NAME"], split="test")
-    
-    # Load MAE embeddings dataset
-    logging.info(f"Loading MAE embeddings dataset: {config['MAE_DATASET_NAME']}")
-    mae_train = load_dataset(config["MAE_DATASET_NAME"], split="train")
-    mae_test = load_dataset(config["MAE_DATASET_NAME"], split="test")
-    
-    # Create crossmatched datasets
-    logging.info(f"Using embedding block: {config['EMBEDDING_BLOCK']}")
-    train_dataset = MAEEmbeddingDataset(gz_train, mae_train, config["EMBEDDING_BLOCK"], normalize=True)
-    test_dataset = MAEEmbeddingDataset(gz_test, mae_test, config["EMBEDDING_BLOCK"], normalize=True)
-
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=config["SAE_BATCH_SIZE"], 
-        shuffle=True,
-        num_workers=4,
-        pin_memory=True
-    )
-    test_loader = DataLoader(
-        test_dataset, 
-        batch_size=config["SAE_BATCH_SIZE"] * 2, 
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
-    
-    logging.info(f"Train dataset size: {len(train_dataset)}")
-    logging.info(f"Test dataset size: {len(test_dataset)}")
-    logging.info("Dataloaders created.")
-    return train_loader, test_loader, train_dataset, test_dataset
 
 
 def train_sae(
@@ -519,11 +282,20 @@ def plot_matryoshka_feature_examples(
             # Extract image from HF dataset format
             if 'image' in row and row['image'] is not None:
                 img_data = row['image']
-                if hasattr(img_data, 'get'):
-                    img = img_data  # Already a PIL image
-                else:
-                    # Handle bytes data if needed
+                
+                # Handle different HF dataset image formats
+                if hasattr(img_data, 'resize'):
+                    # Already a PIL Image
+                    img = img_data
+                elif isinstance(img_data, dict) and 'bytes' in img_data:
+                    # Image stored as bytes in dictionary
                     img = Image.open(io.BytesIO(img_data['bytes']))
+                elif hasattr(img_data, 'convert'):
+                    # Some other PIL-like image format
+                    img = img_data
+                else:
+                    # Try to treat as PIL Image directly
+                    img = img_data
                 
                 # Ensure image is RGB
                 if hasattr(img, 'mode') and img.mode != 'RGB':
@@ -582,20 +354,24 @@ def main():
     parser = argparse.ArgumentParser(description="Train or evaluate Matryoshka SAE on Euclid Q1 MAE embeddings")
     parser.add_argument("--train", action="store_true", 
                        help="Run training mode (default: evaluation mode)")
-    parser.add_argument("--config", type=str, default="mae_matryoshka_sae_config.toml",
-                       help="Path to configuration file (default: mae_matryoshka_sae_config.toml)")
+    parser.add_argument("--config", type=str, default="src/config/mae_matryoshka_sae_config.toml",
+                       help="Path to configuration file (default: src/config/mae_matryoshka_sae_config.toml)")
     args = parser.parse_args()
     
     config = load_config(config_path=args.config, train=args.train) 
     paths = setup_run_directory(config["BASE_RESULTS_DIR"])
     setup_logging(paths["logs"] / "run.log")
+    
+    # Initialize reproducible random state
+    set_seed(config["RANDOM_SEED"])
+    configure_torch_reproducibility()
 
     mode = "Training" if args.train else "Evaluation"
     logging.info(f"Running in {mode} mode")
     logging.info(f"Using device: {config['DEVICE']}")
     logging.info(f"Run directory created at: {paths['run']}")
 
-    train_loader, test_loader, train_dataset, test_dataset = get_dataloaders(config)
+    train_loader, test_loader, train_dataset, test_dataset = get_ssl_dataloaders(config)
 
     if args.train:
         wandb.init(

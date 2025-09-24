@@ -1,0 +1,1 @@
+"""Euclid Q1 SAE analysis package."""

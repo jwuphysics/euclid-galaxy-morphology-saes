@@ -6,7 +6,7 @@ We use sparse autoencoders (SAEs) to identify learned features in galaxy embeddi
 
 All supervised data are loaded directly from the Euclid Q1 [GalaxyZoo Huggingface dataset](https://huggingface.co/datasets/mwalmsley/gz_euclid) (see the general framework [here](https://github.com/mwalmsley/galaxy-datasets)). We use the [Zoobot-Euclid encoder model](https://huggingface.co/mwalmsley/zoobot-encoder-euclid) by Mike Walmsley et al; read more about this work on [arXiv](https://arxiv.org/abs/2503.15310).
 
-The self-supervised model is a [ViT trained via masked autoencoder reconstruction](https://huggingface.co/mwalmsley/euclid_encoder_mae_zoobot_vit_small_patch8_224), originating from the larger Euclid [Euclid "RR2" dataset](https://huggingface.co/datasets/mwalmsley/euclid_rr2).
+The self-supervised model is a [ViT trained via masked autoencoder reconstruction](https://huggingface.co/mwalmsley/euclid_encoder_mae_zoobot_vit_small_patch8_224), originating from the larger Euclid [Euclid "RR2" dataset](https://huggingface.co/mwalmsley/euclid-rr2-mae). Check out an *interactive demo* of masked reconstruction [here](https://huggingface.co/spaces/mwalmsley/euclid_masked_autoencoder).
 
 ## Repository Structure
 

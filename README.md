@@ -8,6 +8,9 @@ All supervised data are loaded directly from the Euclid Q1 [GalaxyZoo Huggingfac
 
 The self-supervised model is a [ViT trained via masked autoencoder reconstruction](https://huggingface.co/mwalmsley/euclid_encoder_mae_zoobot_vit_small_patch8_224), originating from the larger Euclid [Euclid "RR2" dataset](https://huggingface.co/mwalmsley/euclid-rr2-mae). Check out an *interactive demo* of masked reconstruction [here](https://huggingface.co/spaces/mwalmsley/euclid_masked_autoencoder).
 
+Or skim this poster, which accompanies our accepted NeurIPS ML4PS workshop paper:
+![](poster.png)
+
 ## Repository Structure
 
 ```
